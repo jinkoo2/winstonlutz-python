@@ -1,8 +1,0 @@
-SID_mm=1500.04
-Operator=cszarka 
-Gantry=359.987
-Table=0.191406
-Collimator=0
-field center=0,0
-bb_cetner=0.00770476,-0.0220136
-bb offset=0.00770476,-0.0220136

@@ -3,7 +3,6 @@
 email_to=RadOnc_Physicists,Charles.Szarka,marlene.asencio
 #email_to=jinkoo.kim
 
-
 #=======================================
 # sender
 email_from=radonc.physics

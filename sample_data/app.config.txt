@@ -1,0 +1,25 @@
+#=======================================
+# email receivers, comma seperated list
+# application status notification
+email_status_notification_to=jinkoo.kim
+
+#=======================================
+# sender
+email_from=radonc.physics
+
+# encrypted email pw. 
+email_from_enc_pw=
+
+#=======================================
+#email domain/host
+email_domain=stonybrookmedicine.edu
+email_host_address=uhmc-imail.uhmc.sunysb.edu
+email_host_port=25
+enable_ssl=false
+
+
+image_tools_dir=C:\apps\imagetools\2d
+
+
+
+

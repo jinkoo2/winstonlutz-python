@@ -1,0 +1,21 @@
+<html>
+  <head>
+    <title>IGRT Report - {{{machine}}}</title>
+      <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script type="text/javascript">
+      google.charts.load('current', {'packages':['corechart']});
+     
+      {{{callback_block}}}
+
+      {{{draw_function_block}}}
+    </script>
+  </head>
+  <body>
+      <center><h1>IGRT Report - {{{machine}}}</h1></center>
+      <center><h3>{{{measurement_data_field}}}</h3></center>
+      <center><h3>Time: {{{time_range}}}</h3></center>
+      <hr />
+      {{{div_block}}}
+      <hr />
+  </body>
+</html>

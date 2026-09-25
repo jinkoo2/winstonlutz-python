@@ -1,0 +1,32 @@
+#=======================================
+# email receivers, comma seperated list
+email_to=RadOnc_Physicists,Charles.Szarka,marlene.asencio
+#email_to=jinkoo.kim
+
+
+#=======================================
+# sender
+email_from=radonc.physics
+
+# encrypted email pw. 
+email_from_enc_pw=
+
+#=======================================
+#email domain/host
+email_domain=stonybrookmedicine.edu
+email_host_address=uhmc-imail.uhmc.sunysb.edu
+email_host_port=25
+enable_ssl=false
+
+
+#=================================
+# Winston Lutz pass/fail tolerance in mm. It reports failure if BB offset > this value.
+WL_pass_tolerance = 1.0
+
+record_csv_file = \\uhmc-fs-share\Shares\RadOnc\Applications\Morning QA\edge_cone_wl.csv
+
+MV_bb_search_method = ConnectedComponent
+#MV_bb_search_method = LoG
+
+kV_bb_search_method = ConnectedComponent
+#kV_bb_search_method = OtsuThreshold

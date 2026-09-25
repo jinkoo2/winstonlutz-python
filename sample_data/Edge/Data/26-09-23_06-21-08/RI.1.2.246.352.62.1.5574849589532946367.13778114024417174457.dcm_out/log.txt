@@ -1,0 +1,39 @@
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.336000,0.336000]
+Image size = [1190,1190]
+Setting imaign origin to the image center; new origin = [-199.920000,-199.920000]
+checking matching criteria:0028|0011=1190&0028|0010=1190
+checking...:0028|0011=1190
+checking...:0028|0010=1190
+Gantry=179.973
+Table=0.191406
+Collimator=0.000879802
+Operator=cszarka 
+sid_mm=1499.97
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out\img0.mhd
+cropping to the image center: index=[521,521],size=[148,148]
+setting the image center as origin
+Image origin = [-24.864000,-24.864000]
+Image spacing = [0.336000,0.336000]
+Image size = [148,148]
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out\img1.mhd
+otsu thresholding for radiation field detection
+inside_value=0
+outside_value=255
+center of mass=-0.0198456,0.00270621
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out\img.field.mask.mhd
+bb search method = bb_search_ConnectedComponent
+bb detection
+center of mass=-0.098,-0.137333
+center of mass=-0.0467848,-0.127595
+center of mass=-0.0467848,-0.127595
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out\img.bb.mask.mhd
+field center on image=-0.0198456,0.00270621
+bb center on image=-0.0467848,-0.127595
+bb offset from filed center=-0.0269392,-0.130301
+field center at iso=-0.0132306,0.00180418
+bb center at iso=-0.0311905,-0.0850649
+bb offset from field at iso=-0.0179598,-0.0868691
+saving result image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-23_06-21-08\RI.1.2.246.352.62.1.5574849589532946367.13778114024417174457.dcm_out\result.png

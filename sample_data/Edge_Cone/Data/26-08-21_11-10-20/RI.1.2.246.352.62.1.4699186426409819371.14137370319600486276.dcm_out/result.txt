@@ -1,0 +1,8 @@
+SID_mm=1500
+Operator=jwu10 
+Gantry=179.973
+Table=89.998
+Collimator=359.999
+field center=0.2781,-0.111952
+bb_cetner=-0.311404,-0.00878431
+bb offset=-0.589504,0.103168

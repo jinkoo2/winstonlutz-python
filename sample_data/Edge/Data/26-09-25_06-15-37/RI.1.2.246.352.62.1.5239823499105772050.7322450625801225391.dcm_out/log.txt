@@ -1,0 +1,39 @@
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.336000,0.336000]
+Image size = [1190,1190]
+Setting imaign origin to the image center; new origin = [-199.920000,-199.920000]
+checking matching criteria:0028|0011=1190&0028|0010=1190
+checking...:0028|0011=1190
+checking...:0028|0010=1190
+Gantry=90
+Table=358.762
+Collimator=360
+Operator=cszarka 
+sid_mm=1500
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out\img0.mhd
+cropping to the image center: index=[521,521],size=[148,148]
+setting the image center as origin
+Image origin = [-24.864000,-24.864000]
+Image spacing = [0.336000,0.336000]
+Image size = [148,148]
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out\img1.mhd
+otsu thresholding for radiation field detection
+inside_value=0
+outside_value=255
+center of mass=0.295078,-0.386273
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out\img.field.mask.mhd
+bb search method = bb_search_ConnectedComponent
+bb detection
+center of mass=-0.17271,-0.420785
+center of mass=-0.191442,-0.433674
+center of mass=-0.191442,-0.433674
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out\img.bb.mask.mhd
+field center on image=0.295078,-0.386273
+bb center on image=-0.191442,-0.433674
+bb offset from filed center=-0.48652,-0.047401
+field center at iso=0.196719,-0.257516
+bb center at iso=-0.127628,-0.289117
+bb offset from field at iso=-0.324347,-0.0316007
+saving result image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge\26-09-25_06-15-37\RI.1.2.246.352.62.1.5239823499105772050.7322450625801225391.dcm_out\result.png

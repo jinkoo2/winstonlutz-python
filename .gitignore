@@ -7,5 +7,3 @@ build/
 .venv/
 venv/
 .env
-sample_data/
-*.dcm

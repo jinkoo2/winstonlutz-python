@@ -1,0 +1,39 @@
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.336000,0.336000]
+Image size = [1190,1190]
+Setting imaign origin to the image center; new origin = [-199.920000,-199.920000]
+checking matching criteria:0028|0011=1190&0028|0010=1190
+checking...:0028|0011=1190
+checking...:0028|0010=1190
+Gantry=359.98
+Table=0.101563
+Collimator=359.996
+Operator=jwu10 
+sid_mm=1500.05
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out\img0.mhd
+cropping to the image center: index=[521,521],size=[148,148]
+setting the image center as origin
+Image origin = [-24.864000,-24.864000]
+Image spacing = [0.336000,0.336000]
+Image size = [148,148]
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out\img1.mhd
+otsu thresholding for radiation field detection
+inside_value=0
+outside_value=255
+center of mass=0.336072,-1.04274
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out\img.field.mask.mhd
+bb search method = bb_search_ConnectedComponent
+bb detection
+center of mass=-0.478392,-0.163779
+center of mass=-0.476459,-0.0957049
+center of mass=-0.476459,-0.0957049
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out\img.bb.mask.mhd
+field center on image=0.336072,-1.04274
+bb center on image=-0.476459,-0.0957049
+bb offset from filed center=-0.812531,0.947039
+field center at iso=0.22404,-0.695138
+bb center at iso=-0.317628,-0.063801
+bb offset from field at iso=-0.541668,0.631337
+saving result image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-19_08-35-00\RI.1.2.246.352.62.1.4977915949997519352.10620898766660901541.dcm_out\result.png

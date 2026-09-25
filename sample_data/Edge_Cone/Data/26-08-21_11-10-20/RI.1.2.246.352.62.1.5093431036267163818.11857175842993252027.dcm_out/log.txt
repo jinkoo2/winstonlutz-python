@@ -1,0 +1,43 @@
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.388000,0.388000]
+Image size = [1024,768]
+Setting imaign origin to the image center; new origin = [-198.656000,-148.992000]
+checking matching criteria:0028|0011=1190&0028|0010=1190
+checking...:0028|0011=1190
+the value in the file (1024) is different from the given condition value (1190).
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.388000,0.388000]
+Image size = [1024,768]
+Setting imaign origin to the image center; new origin = [-198.656000,-148.992000]
+checking matching criteria:0028|0011=1024&0028|0010=768
+checking...:0028|0011=1024
+checking...:0028|0010=768
+Gantry=90.0199
+Table=359.971
+Collimator=0
+Operator=jwu10 
+sid_mm=1500
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out\img0.mhd
+cropping to the image center: index=[448,320],size=[128,128]
+setting the image center as origin
+Image origin = [-24.832000,-24.832000]
+Image spacing = [0.388000,0.388000]
+Image size = [128,128]
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out\img1.mhd
+bb search method = bb_search_ConnectedComponent
+bb detection
+center of mass=-0.0805468,-0.255392
+center of mass=-0.101596,-0.24383
+center of mass=-0.101596,-0.24383
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out\img.bb.mask.mhd
+field center on image=0,0
+bb center on image=-0.101596,-0.24383
+bb offset from filed center=-0.101596,-0.24383
+field center at iso=0,0
+bb center at iso=-0.0677308,-0.162554
+bb offset from field at iso=-0.0677308,-0.162554
+saving result image as \\varianfs\VA_TRANSFER\QA\2.IGRT\Edge_Cone\26-08-21_11-10-20\RI.1.2.246.352.62.1.5093431036267163818.11857175842993252027.dcm_out\result.png

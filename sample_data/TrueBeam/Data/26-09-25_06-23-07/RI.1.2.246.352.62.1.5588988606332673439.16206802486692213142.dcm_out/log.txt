@@ -1,0 +1,39 @@
+creaded output directory:\\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out
+reading dicom file:\\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm
+Image origin = [0.000000,0.000000]
+Image spacing = [0.336000,0.336000]
+Image size = [1190,1190]
+Setting imaign origin to the image center; new origin = [-199.920000,-199.920000]
+checking matching criteria:0028|0011=1190&0028|0010=1190
+checking...:0028|0011=1190
+checking...:0028|0010=1190
+Gantry=179.99
+Table=0.658203
+Collimator=359.998
+Operator=cszarka 
+sid_mm=1499.98
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img0.mhd
+cropping to the image center: index=[521,521],size=[148,148]
+setting the image center as origin
+Image origin = [-24.864000,-24.864000]
+Image spacing = [0.336000,0.336000]
+Image size = [148,148]
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img1.mhd
+otsu thresholding for radiation field detection
+inside_value=0
+outside_value=255
+center of mass=-0.535243,0.0455572
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img.field.mask.mhd
+bb search method = bb_search_LoG
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img.field.mask.erode.mhd
+saving current image as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\Lap.mhd
+center of mass=-0.0916364,-0.896
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img.bb.mask.mhd
+saving mask as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\img.bb.mask.mhd
+field center on image=-0.535243,0.0455572
+bb center on image=-0.0916364,-0.896
+bb offset from filed center=0.443607,-0.941557
+field center at iso=-0.356833,0.0303718
+bb center at iso=-0.0610916,-0.59734
+bb offset from field at iso=0.295741,-0.627712
+saving result image as \\varianfs\VA_TRANSFER\QA\2.IGRT\TrueBeam\26-09-25_06-23-07\RI.1.2.246.352.62.1.5588988606332673439.16206802486692213142.dcm_out\result.png

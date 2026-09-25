@@ -1,0 +1,13 @@
+ObjectType = Image
+NDims = 2
+BinaryData = True
+BinaryDataByteOrderMSB = False
+CompressedData = False
+TransformMatrix = 1 0 0 1
+Offset = -24.832 -24.832
+CenterOfRotation = 0 0
+ElementSpacing = 0.388 0.388
+DimSize = 128 128
+AnatomicalOrientation = ??
+ElementType = MET_UCHAR
+ElementDataFile = img.bb.mask.raw

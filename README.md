@@ -17,7 +17,7 @@ python -m winstonlutz gui path\to\folder\with\RI.dcm
 
 The GUI lets you pick a folder of `RI.*.dcm` files, run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
 
-`validate-golden` re-runs analysis on `sample_data` and compares `result.txt` to the original C++ output (default tolerance 0.1 mm). Local `sample_data/` (machine configs and RI DICOMs) is not in this repo — point `--data-root` or the GUI at your own case folder.
+`validate-golden` re-runs analysis on `sample_data` and compares `result.txt` to the original C++ output (default tolerance 0.1 mm). The repo includes three machines (`Edge`, `Edge_Cone`, `TrueBeam`) with three cases each.
 
 ## Analysis pipeline
 

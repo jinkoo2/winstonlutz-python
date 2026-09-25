@@ -1,0 +1,55 @@
+﻿<!DOCTYPE html>
+
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8" />
+    <title>IGRT (TrueBeam)</title>
+
+    <!-- Latest compiled and minified CSS -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css" integrity="sha384-1q8mTJOASx8j1Au+a5WDVnPi2lkFfwwEAa8hDDdjZlpLegxhjVME1fgjWPGmkzs7" crossorigin="anonymous">
+
+    <!-- Latest compiled and minified JavaScript -->
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
+</head>
+
+<body>
+
+
+    <div class="panel panel-primary">
+        <div class="panel-heading">
+            <h1 class="panel-title"> IGRT Report ({{{date}}})</h1>
+        </div>
+        <div class="panel-body" style="margin:7px">
+
+            <!---- begin--->
+            <div class="input-group" >
+                <span class="input-group-addon" id="basic-addon1" width="100">Date/Time</span>
+                <input type="text" class="form-control" value="{{{date}}} {{{time}}}" aria-describedby="basic-addon1">
+            </div>
+
+            <div class="input-group"  >
+                <span class="input-group-addon" id="basic-addon1">Operator</span>
+                <input type="text" class="form-control" value="{{{user}}}" aria-describedby="basic-addon1">
+            </div>
+
+            <div class="input-group"  >
+                <span class="input-group-addon" id="basic-addon1">Result</span>
+                <input type="text" class="form-control" value="{{{result}}}" aria-describedby="basic-addon1">
+            </div>
+            
+            <br />
+
+            {{{body}}}
+
+            <!--- end -->
+
+        </div>
+	<ul>
+	<li>Tolerance = {{{tol}}} mm</li>
+	<li>FC - (Radiation) Field Center</li>
+	<li>IC - Image Center </li>
+	<li>Full report = <a href="{{{full_report}}}">{{{full_report}}}</a> </li>
+	</ul>
+    </div>
+</body>
+</html>

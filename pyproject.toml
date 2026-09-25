@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winstonlutz"
+version = "0.1.0"
+description = "Python port of the Winston-Lutz IGRT QA pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "SimpleITK>=2.3",
+    "numpy",
+    "pydicom",
+    "watchdog",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+gui = ["PyQt5"]
+
+[project.scripts]
+winstonlutz = "winstonlutz.cli:main"
+winstonlutz-gui = "winstonlutz.gui:run_app"
+
+[tool.setuptools.packages.find]
+include = ["winstonlutz*"]
+
+[tool.setuptools.package-data]
+winstonlutz = ["icons/*"]

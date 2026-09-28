@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+
 from pathlib import Path
 
 from .analysis import analyze_image
@@ -52,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     p_gui = sub.add_parser("gui", help="open the Winston-Lutz viewer / analysis app")
     p_gui.add_argument("folder", nargs="?", help="optional RI folder to open")
 
+    p_plan = sub.add_parser("plan-beams", help="list beams from an RP RT Plan DICOM")
+    p_plan.add_argument("rtplan", nargs="?", help="RP.*.dcm (default: Edge sample Plan)")
+
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -92,6 +96,23 @@ def main(argv: list[str] | None = None) -> int:
         from .gui import run_app
 
         return run_app(folder=args.folder)
+
+    if args.cmd == "plan-beams":
+        from .rtplan import list_plan_beams
+
+        path = Path(args.rtplan) if args.rtplan else (
+            Path(__file__).resolve().parent.parent / "sample_data" / "Edge" / "Plan" / "RP.EdgeDryRun.WL.dcm"
+        )
+        if not path.is_file():
+            print(f"RT Plan not found: {path}", file=sys.stderr)
+            return 1
+        beams = list_plan_beams(path)
+        print(f"{'Beam':>4}  {'Name':<16}  {'Type':<4}  {'Gantry':>6}  {'Table':>6}  {'Coll':>6}")
+        for b in beams:
+            print(
+                f"{b.number:4d}  {b.name:<16}  {b.kind:<4}  {b.gantry:6.0f}  {b.table:6.0f}  {b.collimator:6.0f}"
+            )
+        return 0 if beams else 1
 
     return 2
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "winstonlutz"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python port of the Winston-Lutz IGRT QA pipeline"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 gui = ["PyQt5"]
+build = ["pyinstaller>=6", "build"]
 
 [project.scripts]
 winstonlutz = "winstonlutz.cli:main"
@@ -27,3 +28,7 @@ include = ["winstonlutz*"]
 
 [tool.setuptools.package-data]
 winstonlutz = ["icons/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

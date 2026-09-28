@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+packaging/WinstonLutz.spec
 .venv/
 venv/
 .env
+/winstonlutz.gui.settings.json

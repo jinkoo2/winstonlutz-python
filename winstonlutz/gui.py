@@ -5,19 +5,23 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt5.QtCore import QPoint, QPointF, QSettings, QSize, QThread, QUrl, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon
+from PyQt5.QtCore import QAbstractListModel, QModelIndex, QPoint, QPointF, QSettings, QSize, QThread, QTimer, QUrl, Qt, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHeaderView,
     QLabel,
+    QListView,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -33,17 +37,51 @@ from PyQt5.QtWidgets import (
 
 import SimpleITK as sitk
 
-from .analysis import classify_rt_image, load_ri_for_display
+from .analysis import (
+    AnalysisParams,
+    RiSetup,
+    analysis_params_from_machine,
+    angle_sort_key,
+    classify_rt_image,
+    display_angle,
+    gtc_beam_name,
+    load_ri_for_display,
+    read_ri_setup,
+)
+from .app_settings import (
+    MACHINES_KEY,
+    find_machine_for_folder,
+    get_institution,
+    get_machines,
+    load_gui_settings,
+    save_gui_settings,
+)
 from .image_viewer import ImageViewer, sitk_to_array
 from .models import WinstonLutzItem
 from .pipeline import (
     analyze_folder,
+    case_has_results,
+    case_has_ri,
+    case_recency_key,
+    case_result_status,
     find_html_report,
     infer_folder_bb_methods,
+    list_case_candidates,
     list_ri_files,
     load_existing_results,
     write_html_reports,
 )
+from .rtplan import (
+    PlanBeam,
+    beam_expects_image,
+    find_machine_rtplan,
+    list_plan_beams,
+    machine_all_ri_required,
+    machine_ignore_beams,
+    match_ri_files_to_beams,
+    missing_required_beams,
+)
+from .settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +126,175 @@ def machine_name(folder: Path | None) -> str:
     if not name or name in (".", ""):
         return ""
     return name
+
+
+def window_title(case: str = "") -> str:
+    parts = ["Winston-Lutz"]
+    institution = get_institution()
+    if institution:
+        parts.append(institution)
+    if case:
+        parts.append(case)
+    return " — ".join(parts)
+
+
+def _restore_layout(widget, settings: QSettings, key: str, splitter: QSplitter | None = None) -> None:
+    geom = settings.value(f"{key}/geometry")
+    if geom is not None:
+        widget.restoreGeometry(geom)
+    if splitter is not None:
+        state = settings.value(f"{key}/splitter")
+        if state is not None:
+            splitter.restoreState(state)
+
+
+def _save_layout(widget, settings: QSettings, key: str, splitter: QSplitter | None = None) -> None:
+    settings.setValue(f"{key}/geometry", widget.saveGeometry())
+    if splitter is not None:
+        settings.setValue(f"{key}/splitter", splitter.saveState())
+    settings.sync()
+
+
+_STATUS_COLORS = {
+    "new": QColor("#64748b"),
+    "pass": QColor("#15803d"),
+    "fail": QColor("#b91c1c"),
+}
+
+
+class _SortItem(QTableWidgetItem):
+    """QTableWidget cell that sorts by a numeric/tuple key instead of display text."""
+
+    def __init__(self, text: str, key, path: Path | None = None):
+        super().__init__(text)
+        self._key = key
+        if path is not None:
+            self.setData(Qt.UserRole, str(path))
+
+    def __lt__(self, other):
+        if isinstance(other, _SortItem):
+            return self._key < other._key
+        return super().__lt__(other)
+
+
+def _type_rank(kind: str) -> int:
+    if kind == "MV":
+        return 0
+    if kind == "kV":
+        return 1
+    return 2
+
+
+class CaseListModel(QAbstractListModel):
+    """Loads case folders in batches; status is computed only for rows that are fetched."""
+
+    PAGE = 40
+    MAX_SCAN = 120
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._candidates: list[Path] = []
+        self._cursor = 0
+        self._rows: list[tuple[Path, str]] = []
+        self._filter = "new"
+        self._tol = 1.0
+        self._busy = False
+
+    def set_source(self, candidates: list[Path], tol_mm: float, status_filter: str) -> None:
+        self.beginResetModel()
+        self._candidates = candidates
+        self._cursor = 0
+        self._rows = []
+        self._filter = status_filter or "new"
+        self._tol = tol_mm
+        self._busy = False
+        self.endResetModel()
+        self.fetchMore(QModelIndex())
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        folder, status = self._rows[index.row()]
+        if role == Qt.DisplayRole:
+            return f"{folder.name}    {status}"
+        if role == Qt.ForegroundRole:
+            return QBrush(_STATUS_COLORS.get(status, QColor("#334155")))
+        if role == Qt.FontRole:
+            font = QFont()
+            font.setBold(status != "new")
+            return font
+        if role == Qt.UserRole:
+            return str(folder)
+        return None
+
+    def case_at(self, row: int) -> Path | None:
+        if 0 <= row < len(self._rows):
+            return self._rows[row][0]
+        return None
+
+    def row_for_name(self, name: str) -> int:
+        if not name:
+            return -1
+        for i, (folder, _status) in enumerate(self._rows):
+            if folder.name == name:
+                return i
+        return -1
+
+    def canFetchMore(self, parent=QModelIndex()) -> bool:
+        if parent.isValid():
+            return False
+        return self._cursor < len(self._candidates)
+
+    def fetchMore(self, parent=QModelIndex()) -> None:
+        if parent.isValid() or self._busy or not self.canFetchMore():
+            return
+        self._busy = True
+        added: list[tuple[Path, str]] = []
+        scanned = 0
+        try:
+            while self._cursor < len(self._candidates) and len(added) < self.PAGE and scanned < self.MAX_SCAN:
+                folder = self._candidates[self._cursor]
+                self._cursor += 1
+                scanned += 1
+                row = self._inspect(folder)
+                if row is not None:
+                    added.append(row)
+        finally:
+            self._busy = False
+        if added:
+            for folder, status in added:
+                self._insert_newest_first(folder, status)
+        elif self.canFetchMore():
+            QTimer.singleShot(0, lambda: self.fetchMore(QModelIndex()))
+
+    def _insert_newest_first(self, folder: Path, status: str) -> None:
+        key = case_recency_key(folder)
+        idx = len(self._rows)
+        for i, (existing, _status) in enumerate(self._rows):
+            if case_recency_key(existing) < key:
+                idx = i
+                break
+        self.beginInsertRows(QModelIndex(), idx, idx)
+        self._rows.insert(idx, (folder, status))
+        self.endInsertRows()
+
+    def _inspect(self, folder: Path) -> tuple[Path, str] | None:
+        if not case_has_ri(folder):
+            return None
+        wanted = self._filter
+        if wanted == "new":
+            if case_has_results(folder):
+                return None
+            return folder, "new"
+        status = case_result_status(folder, self._tol)
+        if wanted in ("pass", "fail") and status != wanted:
+            return None
+        return folder, status
 
 
 def case_display_name(folder: Path | None) -> str:
@@ -148,7 +355,7 @@ class SummaryBanner(QFrame):
         result_font.setPointSize(16)
         result_font.setBold(True)
         self.result.setFont(result_font)
-        self.hint = QLabel("Open a folder that contains RI.*.dcm files.")
+        self.hint = QLabel("Open Case: choose a machine and a case with RI images.")
         self.hint.setObjectName("summaryHint")
         self.hint.setWordWrap(True)
 
@@ -204,6 +411,35 @@ PASS_FG = QColor(4, 120, 50)
 PASS_BG = QColor(220, 247, 228)
 FAIL_FG = QColor(185, 28, 28)
 FAIL_BG = QColor(254, 226, 226)
+MISSING_FG = QColor(180, 83, 9)
+MISSING_BG = QColor(255, 237, 213)
+RUN_FG = QColor(71, 85, 105)
+RUN_BG = QColor(241, 245, 249)
+NA_FG = QColor(100, 116, 139)
+NA_BG = QColor(241, 245, 249)
+
+PLAN_TABLE_HEADERS = [
+    "Beam",
+    "Name",
+    "Type",
+    "Gantry",
+    "Table",
+    "Coll",
+    "BB − FC (mm)",
+    "d (mm)",
+    "Result",
+]
+FILE_TABLE_HEADERS = [
+    "#",
+    "Name",
+    "Type",
+    "Gantry",
+    "Table",
+    "Coll",
+    "BB − FC (mm)",
+    "d (mm)",
+    "Result",
+]
 
 
 def _toolbar_icon(name: str, size: int = 22) -> QIcon:
@@ -276,6 +512,19 @@ def _toolbar_icon(name: str, size: int = 22) -> QIcon:
         p.setBrush(Qt.NoBrush)
         p.drawArc(7, 5, 8, 8, 40 * 16, 200 * 16)
         p.drawPoint(11, s - 6)
+    elif name == "settings":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(71, 85, 105))
+        cx = cy = s / 2.0
+        for i in range(6):
+            p.save()
+            p.translate(cx, cy)
+            p.rotate(i * 60)
+            p.drawRoundedRect(-2, int(-s * 0.46), 4, int(s * 0.28), 1, 1)
+            p.restore()
+        p.drawEllipse(QPointF(cx, cy), s * 0.28, s * 0.28)
+        p.setBrush(QColor(243, 244, 246))
+        p.drawEllipse(QPointF(cx, cy), s * 0.12, s * 0.12)
     p.end()
     return QIcon(pm)
 
@@ -307,16 +556,216 @@ class AnalyzeWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class OpenCaseDialog(QDialog):
+    """Pick a machine, then a case; RI files for the selected case are listed."""
+
+    def __init__(self, parent=None, last_machine: str = "", last_case: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Open Case")
+        self.resize(720, 460)
+        self.machines = [m for m in get_machines() if str(m.get("NAME") or "").strip()]
+        self.selected_case: Path | None = None
+        self._prefer_case = last_case
+
+        self.machine_combo = QComboBox()
+        for machine in self.machines:
+            self.machine_combo.addItem(str(machine["NAME"]).strip(), machine)
+
+        self.filter_combo = QComboBox()
+        for status in ("new", "fail", "pass", "all"):
+            self.filter_combo.addItem(status, status)
+        self.filter_combo.setCurrentIndex(0)
+
+        self.case_model = CaseListModel(self)
+        self.case_view = QListView()
+        self.case_view.setModel(self.case_model)
+        self.case_view.setUniformItemSizes(True)
+        self.case_view.setSelectionMode(QListView.SingleSelection)
+        self.file_list = QListWidget()
+        self.case_view.selectionModel().currentChanged.connect(self._on_case_changed)
+        self.case_view.doubleClicked.connect(self._accept_if_case)
+        self.case_model.rowsInserted.connect(self._maybe_select_first)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_case)
+        buttons.rejected.connect(self.reject)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+        self.ok_button.setText("Open")
+        self.ok_button.setEnabled(False)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Machine"))
+        top.addWidget(self.machine_combo, 1)
+
+        lists = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Cases"))
+        filter_row.addStretch(1)
+        filter_row.addWidget(QLabel("Show"))
+        filter_row.addWidget(self.filter_combo)
+        left_layout.addLayout(filter_row)
+        left_layout.addWidget(self.case_view, 1)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(QLabel("RI files"))
+        right_layout.addWidget(self.file_list, 1)
+        lists.addWidget(left)
+        lists.addWidget(right)
+        lists.setChildrenCollapsible(False)
+        lists.setStretchFactor(0, 1)
+        lists.setStretchFactor(1, 1)
+        self.splitter = lists
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(lists, 1)
+        layout.addWidget(buttons)
+
+        self._settings = getattr(parent, "settings", None) if parent is not None else None
+        if self._settings is None:
+            self._settings = QSettings("MachineQA", "WinstonLutz")
+        self._splitter_restored = False
+        _restore_layout(self, self._settings, "open_case")
+
+        if last_machine:
+            idx = self.machine_combo.findText(last_machine)
+            if idx >= 0:
+                self.machine_combo.setCurrentIndex(idx)
+        self._reload_cases(ask_folder=True)
+        self.machine_combo.currentIndexChanged.connect(lambda *_: self._reload_cases(ask_folder=True))
+        self.filter_combo.currentIndexChanged.connect(lambda *_: self._reload_cases(ask_folder=False))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._splitter_restored:
+            self._splitter_restored = True
+            _restore_layout(self, self._settings, "open_case", self.splitter)
+
+    def done(self, result):
+        _save_layout(self, self._settings, "open_case", self.splitter)
+        super().done(result)
+
+    def _data_folder_path(self, machine: dict) -> Path | None:
+        text = str(machine.get("DATA_FOLDER") or "").strip()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        return path if path.is_dir() else None
+
+    def _persist_data_folder(self, machine: dict, folder: str) -> None:
+        machine["DATA_FOLDER"] = folder
+        data = load_gui_settings()
+        name = str(machine.get("NAME") or "").strip()
+        machines = [m for m in (data.get(MACHINES_KEY) or []) if isinstance(m, dict)]
+        for entry in machines:
+            if str(entry.get("NAME") or "").strip() == name:
+                entry["DATA_FOLDER"] = folder
+                break
+        data[MACHINES_KEY] = machines
+        save_gui_settings(data)
+
+    def _ensure_data_folder(self, machine: dict) -> bool:
+        if self._data_folder_path(machine) is not None:
+            return True
+        name = str(machine.get("NAME") or "this machine").strip()
+        current = str(machine.get("DATA_FOLDER") or "").strip() or "(not set)"
+        QMessageBox.warning(
+            self,
+            "Data folder",
+            f"DATA_FOLDER for {name} is missing or does not exist:\n{current}\n\n"
+            "Please choose the Data folder for this machine.",
+        )
+        start = str(machine.get("DATA_FOLDER") or "").strip()
+        start_path = Path(start).expanduser() if start else Path()
+        start_dir = ""
+        if start_path.is_dir():
+            start_dir = str(start_path)
+        elif start_path.parent.is_dir():
+            start_dir = str(start_path.parent)
+        chosen = QFileDialog.getExistingDirectory(
+            self, f"Select DATA_FOLDER for {name}", start_dir
+        )
+        if not chosen:
+            return False
+        self._persist_data_folder(machine, chosen)
+        return True
+
+    def _reload_cases(self, ask_folder: bool = True):
+        self.file_list.clear()
+        self.selected_case = None
+        self.ok_button.setEnabled(False)
+        machine = self.machine_combo.currentData()
+        if not machine:
+            self.case_model.set_source([], 1.0, "new")
+            return
+        if ask_folder and not self._ensure_data_folder(machine):
+            self.case_model.set_source([], 1.0, str(self.filter_combo.currentData() or "new"))
+            return
+        tol = 1.0
+        if machine.get("WL_pass_tolerance") not in (None, ""):
+            tol = float(machine["WL_pass_tolerance"])
+        self.case_model.set_source(
+            list_case_candidates(machine),
+            tol,
+            str(self.filter_combo.currentData() or "new"),
+        )
+
+    def _maybe_select_first(self):
+        if self.case_view.currentIndex().isValid():
+            return
+        if self._select_case_named(self._prefer_case):
+            return
+        if self.case_model.rowCount():
+            self.case_view.setCurrentIndex(self.case_model.index(0, 0))
+
+    def _select_case_named(self, name: str) -> bool:
+        row = self.case_model.row_for_name(name)
+        if row < 0:
+            return False
+        self.case_view.setCurrentIndex(self.case_model.index(row, 0))
+        return True
+
+    def _on_case_changed(self, current, _previous):
+        self.file_list.clear()
+        self.selected_case = None
+        self.ok_button.setEnabled(False)
+        if not current.isValid():
+            return
+        folder = self.case_model.case_at(current.row())
+        if folder is None:
+            return
+        self.selected_case = folder
+        self.ok_button.setEnabled(True)
+        for dcm in list_ri_files(folder):
+            self.file_list.addItem(dcm.name)
+
+    def _accept_if_case(self, *_args):
+        if self.selected_case is not None:
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Winston-Lutz")
+        self.setWindowTitle(window_title())
         self.setWindowIcon(app_icon())
         self.resize(1400, 860)
 
         self.folder: Path | None = None
         self.files: list[Path] = []
         self.items: list[WinstonLutzItem] = []
+        self.setups: dict[Path, RiSetup] = {}
+        self.analysis_params = AnalysisParams()
+        self.plan_beams: list[PlanBeam] = []
+        self.beam_ri: dict[int, Path] = {}
+        self.unmatched_ri: list[Path] = []
+        self.ignore_beams: set[int] = set()
+        self.all_ri_required = False
+        self._analysis_running = False
         self.worker: AnalyzeWorker | None = None
         self.tol_mm = 1.0
         self._current_modality: str | None = None
@@ -326,10 +775,8 @@ class MainWindow(QMainWindow):
         self.viewer.status_changed.connect(self.statusBar().showMessage)
         self.viewer.window_level_changed.connect(self._on_viewer_wl)
 
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(
-            ["#", "Type", "Gantry", "Table", "Coll", "BB − FC (mm)", "d (mm)", "Result"]
-        )
+        self.table = QTableWidget(0, len(FILE_TABLE_HEADERS))
+        self.table.setHorizontalHeaderLabels(FILE_TABLE_HEADERS)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -342,9 +789,15 @@ class MainWindow(QMainWindow):
         header.setHighlightSections(False)
         header.setDefaultAlignment(Qt.AlignCenter)
         header.setStretchLastSection(False)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
         header.setSectionResizeMode(QHeaderView.Stretch)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.sortIndicatorChanged.connect(self._remember_sort)
+        self._sort_col = 1
+        self._sort_order = Qt.AscendingOrder
+        self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         self.table.setStyleSheet(
             """
@@ -416,13 +869,22 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready")
+        _restore_layout(self, self.settings, "main")
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self._split_initialized:
             self._split_initialized = True
-            half = max(self.splitter.width() // 2, 1)
-            self.splitter.setSizes([half, half])
+            state = self.settings.value("main/splitter")
+            if state is not None:
+                self.splitter.restoreState(state)
+            else:
+                half = max(self.splitter.width() // 2, 1)
+                self.splitter.setSizes([half, half])
+
+    def closeEvent(self, event):
+        _save_layout(self, self.settings, "main", self.splitter)
+        super().closeEvent(event)
 
     def _make_action(self, text, icon_name, slot, shortcut=None, checkable=False, checked=False):
         act = QAction(_toolbar_icon(icon_name), text, self)
@@ -456,11 +918,12 @@ class MainWindow(QMainWindow):
         return row
 
     def _build_toolbar(self) -> QWidget:
-        open_act = self._make_action("Open Folder", "folder", self.open_folder, "Ctrl+O")
+        open_act = self._make_action("Open Case", "folder", self.open_case, "Ctrl+O")
         self.run_act = self._make_action("Run Analysis", "run", self.run_analysis, "Ctrl+R")
         self.run_act.setEnabled(False)
         self.report_act = self._make_action("View Report", "report", self.view_report)
         self.report_act.setEnabled(False)
+        settings_act = self._make_action("Settings", "settings", self.open_settings, "Ctrl+,")
         help_act = self._make_action("Help", "help", self._show_help)
 
         self.mv_method = QComboBox()
@@ -525,6 +988,7 @@ class MainWindow(QMainWindow):
                 self._tool_button(open_act),
                 self._tool_button(self.run_act),
                 self._tool_button(self.report_act),
+                self._tool_button(settings_act),
                 QLabel(" MV BB Detection "),
                 self.mv_method,
                 QLabel(" kV BB Detection "),
@@ -558,32 +1022,107 @@ class MainWindow(QMainWindow):
         )
         return panel
 
-    def _last_dir(self) -> str:
-        return self.settings.value("last_directory", str(Path.cwd()))
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec_()
+        if not dlg.did_save:
+            return
+        self.setWindowTitle(
+            window_title(case_display_name(self.folder) if self.folder else "")
+        )
+        if self.folder:
+            self.load_folder(self.folder)
 
-    def open_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "Select folder with RI DICOM files", self._last_dir())
-        if path:
-            self.load_folder(Path(path))
+    def open_case(self):
+        machines = [m for m in get_machines() if str(m.get("NAME") or "").strip()]
+        if not machines:
+            QMessageBox.warning(
+                self,
+                "Open Case",
+                "No machines are defined. Open Settings and add at least one machine.",
+            )
+            return
+        last_machine = str(self.settings.value("last_machine", "") or "")
+        last_case = Path(str(self.settings.value("last_directory", "") or "")).name
+        dlg = OpenCaseDialog(self, last_machine=last_machine, last_case=last_case)
+        if dlg.exec_() != QDialog.Accepted or dlg.selected_case is None:
+            return
+        self.settings.setValue("last_machine", dlg.machine_combo.currentText())
+        self.load_folder(dlg.selected_case)
 
     def load_folder(self, folder: str | Path) -> bool:
         folder = Path(folder)
         files = list_ri_files(folder)
-        if not files:
+        machine_cfg = find_machine_for_folder(folder)
+        self.analysis_params = analysis_params_from_machine(machine_cfg)
+        self.all_ri_required = machine_all_ri_required(machine_cfg)
+        self.ignore_beams = machine_ignore_beams(machine_cfg)
+        self.plan_beams = []
+        self.beam_ri = {}
+        self.unmatched_ri = []
+        self._analysis_running = False
+        explicit_plan = str(
+            (machine_cfg or {}).get("DICOM_PLAN_FILE")
+            or (machine_cfg or {}).get("RTPLAN_FILE_PATH")
+            or ""
+        ).strip()
+        plan_path = find_machine_rtplan(machine_cfg) if explicit_plan else None
+        if plan_path is not None:
+            try:
+                self.plan_beams = list_plan_beams(plan_path)
+            except Exception:
+                logger.exception("could not read RT Plan %s", plan_path)
+                self.plan_beams = []
+        if self.plan_beams:
+            self.beam_ri, self.unmatched_ri = match_ri_files_to_beams(files, self.plan_beams)
+        if not files and not self.plan_beams:
             QMessageBox.warning(self, "No RI files", f"No RI.*.dcm files in:\n{folder}")
             return False
         self.settings.setValue("last_directory", str(folder))
         self.folder = folder
         self.files = files
         self.items = load_existing_results(folder)
+        have_result = {Path(i.DCM).resolve() for i in self.items}
+        self.setups = {}
+        for path in files:
+            if path.resolve() in have_result:
+                continue
+            try:
+                self.setups[path.resolve()] = read_ri_setup(path, self.analysis_params)
+            except Exception:
+                logger.exception("could not read Type/Gantry/Table/Coll from %s", path.name)
         self.run_act.setEnabled(True)
-        self.setWindowTitle(f"Winston-Lutz — {case_display_name(folder)}")
+        self.setWindowTitle(window_title(case_display_name(folder)))
         self._apply_bb_methods(*infer_folder_bb_methods(folder, self.items))
+        if machine_cfg and machine_cfg.get("WL_pass_tolerance") not in (None, ""):
+            self.tol_spin.setValue(float(machine_cfg["WL_pass_tolerance"]))
+        self._configure_table(bool(self.plan_beams))
+        self._sort_col = 0 if self.plan_beams else 2
+        self._sort_order = Qt.AscendingOrder
         self._fill_table()
         self._update_report_button()
         extra = f"  ({len(self.items)} existing result.txt)" if self.items else ""
-        self.statusBar().showMessage(f"Loaded {len(files)} RI images{extra}")
+        if self.plan_beams:
+            n_miss = len(
+                missing_required_beams(self.plan_beams, self.beam_ri, self.ignore_beams)
+            )
+            self.statusBar().showMessage(
+                f"Loaded {len(self.beam_ri)}/{len(self.plan_beams)} plan beams, {len(files)} RI images{extra}"
+                + (f", {n_miss} missing" if n_miss else "")
+            )
+        else:
+            self.statusBar().showMessage(f"Loaded {len(files)} RI images{extra}")
         return True
+
+    def _configure_table(self, plan_mode: bool) -> None:
+        headers = PLAN_TABLE_HEADERS if plan_mode else FILE_TABLE_HEADERS
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        header = self.table.horizontalHeader()
+        for i in range(len(headers)):
+            header.setSectionResizeMode(i, QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
 
     def _apply_bb_methods(self, mv_method: str, kv_method: str):
         if mv_method:
@@ -600,7 +1139,18 @@ class MainWindow(QMainWindow):
             return
         path = find_html_report(self.folder)
         if path is None and self.items:
-            path = write_html_reports(self.folder, self.items, self.tol_mm)
+            path = write_html_reports(
+                self.folder,
+                self.items,
+                self.tol_mm,
+                case_passed=self._case_passed(
+                    sum(
+                        1
+                        for i in self.items
+                        if i.calc_norm_of_bb_offset_from_field_center() > self.tol_mm
+                    )
+                ),
+            )
             self._update_report_button()
         if path is None:
             QMessageBox.information(
@@ -620,7 +1170,9 @@ class MainWindow(QMainWindow):
         if not self.folder:
             return
         self.run_act.setEnabled(False)
+        self._analysis_running = True
         self.progress.show()
+        self._fill_table(reload_image=False)
         self.worker = AnalyzeWorker(
             self.folder,
             self.mv_method.currentText(),
@@ -632,132 +1184,368 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._analysis_failed)
         self.worker.start()
 
+    def _case_passed(self, n_fail: int) -> bool:
+        if n_fail:
+            return False
+        if self.all_ri_required and missing_required_beams(
+            self.plan_beams, self.beam_ri, self.ignore_beams
+        ):
+            return False
+        return True
+
     def _analysis_done(self, items: list):
+        self._analysis_running = False
         self.progress.hide()
         self.run_act.setEnabled(True)
         self.items = items
         if self.folder and items:
-            write_html_reports(self.folder, items, self.tol_mm)
+            n_fail = sum(
+                1
+                for i in items
+                if i.calc_norm_of_bb_offset_from_field_center() > self.tol_mm
+            )
+            write_html_reports(
+                self.folder,
+                items,
+                self.tol_mm,
+                case_passed=self._case_passed(n_fail),
+            )
         self._fill_table()
         self._update_report_button()
         self.statusBar().showMessage(f"Analysis finished: {len(items)} images")
 
     def _analysis_failed(self, message: str):
+        self._analysis_running = False
         self.progress.hide()
         self.run_act.setEnabled(True)
+        self._fill_table(reload_image=False)
         QMessageBox.critical(self, "Analysis failed", message)
 
     def _tol_changed(self, value: float):
         self.tol_mm = value
         self._fill_table(reload_image=False)
 
+    def _remember_sort(self, column: int, order):
+        self._sort_col = column
+        self._sort_order = order
+
     def _fill_table(self, reload_image: bool = True):
         current = self._current_path()
-        by_path = {Path(i.DCM).resolve(): i for i in self.items}
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.files))
-        max_d = 0.0
-        n_fail = 0
-        for row, path in enumerate(self.files):
-            item = by_path.get(path.resolve())
-            values = [str(row + 1), "", "", "", "", "", "", ""]
-            passed = None
-            if item:
-                d = item.calc_norm_of_bb_offset_from_field_center()
-                max_d = max(max_d, d)
-                passed = d <= self.tol_mm
-                if not passed:
-                    n_fail += 1
-                off = item.bb_offset_from_field_center
-                values = [
-                    str(row + 1),
-                    "MV" if item.MV else "kV",
-                    f"{item.gantry:.1f}",
-                    f"{item.table:.1f}",
-                    f"{item.collimator:.1f}",
-                    f"{off[0]:.2f}, {off[1]:.2f}",
-                    f"{d:.2f}",
-                    "Pass" if passed else "Fail",
-                ]
-            result_font = QFont(self.table.font())
-            result_font.setBold(True)
-            alignments = [
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-                Qt.AlignCenter,
-            ]
-            for col, text in enumerate(values):
-                cell = QTableWidgetItem(text)
-                cell.setToolTip(path.name)
-                cell.setTextAlignment(alignments[col] | Qt.AlignVCenter)
-                if passed is not None and col in (6, 7):
-                    cell.setFont(result_font)
-                    if passed:
-                        cell.setForeground(PASS_FG)
-                        cell.setBackground(PASS_BG)
-                    else:
-                        cell.setForeground(FAIL_FG)
-                        cell.setBackground(FAIL_BG)
-                self.table.setItem(row, col, cell)
-        select = 0
-        if current is not None:
-            for i, path in enumerate(self.files):
-                if path.resolve() == current.resolve():
-                    select = i
-                    break
-        if self.files:
-            self.table.selectRow(select)
+        self.table.setSortingEnabled(False)
+        if self.plan_beams:
+            max_d, n_fail = self._fill_plan_table()
+        else:
+            max_d, n_fail = self._fill_file_table()
+        self.table.setSortingEnabled(True)
+        if 0 <= self._sort_col < self.table.columnCount():
+            self.table.sortItems(self._sort_col, self._sort_order)
+        self._select_row_for_path(current)
         self.table.blockSignals(False)
         if reload_image:
             self._on_row_selected()
+        self._update_summary(max_d, n_fail)
+
+    def _select_row_for_path(self, current: Path | None) -> None:
+        select = 0
+        if current is not None:
+            current_res = current.resolve()
+            for i in range(self.table.rowCount()):
+                stored = self.table.item(i, 0)
+                if stored and Path(str(stored.data(Qt.UserRole) or "")).resolve() == current_res:
+                    select = i
+                    break
+        if self.table.rowCount():
+            self.table.selectRow(select)
+
+    def _paint_result_cell(self, cell: QTableWidgetItem, kind: str) -> None:
+        cell.setFont(QFont(self.table.font().family(), self.table.font().pointSize(), QFont.Bold))
+        if kind == "pass":
+            cell.setForeground(PASS_FG)
+            cell.setBackground(PASS_BG)
+        elif kind == "fail":
+            cell.setForeground(FAIL_FG)
+            cell.setBackground(FAIL_BG)
+        elif kind == "missing":
+            cell.setForeground(MISSING_FG)
+            cell.setBackground(MISSING_BG)
+        elif kind == "running":
+            cell.setForeground(RUN_FG)
+            cell.setBackground(RUN_BG)
+        elif kind == "na":
+            cell.setForeground(NA_FG)
+            cell.setBackground(NA_BG)
+
+    def _fill_plan_table(self) -> tuple[float, int]:
+        by_path = {Path(i.DCM).resolve(): i for i in self.items}
+        self.table.setRowCount(len(self.plan_beams))
+        max_d = 0.0
+        n_fail = 0
+        p = self.analysis_params
+        for row, beam in enumerate(self.plan_beams):
+            path = self.beam_ri.get(beam.number)
+            item = by_path.get(path.resolve()) if path is not None else None
+            d_val: float | None = None
+            off_text = ""
+            result_text = ""
+            result_kind = ""
+            passed = None
+            if path is None:
+                if beam.number in self.ignore_beams:
+                    result_text = "NA"
+                    result_kind = "na"
+                else:
+                    result_text = "Missing"
+                    result_kind = "missing"
+                    if self.all_ri_required and beam_expects_image(
+                        beam, self.ignore_beams
+                    ):
+                        n_fail += 1
+            elif self._analysis_running and item is None:
+                result_text = "Running"
+                result_kind = "running"
+            elif item is not None:
+                d_val = item.calc_norm_of_bb_offset_from_field_center()
+                max_d = max(max_d, d_val)
+                passed = d_val <= self.tol_mm
+                if not passed:
+                    n_fail += 1
+                off = item.bb_offset_from_field_center
+                off_text = f"{off[0]:.2f}, {off[1]:.2f}"
+                result_text = "Pass" if passed else "Fail"
+                result_kind = "pass" if passed else "fail"
+            values = [
+                str(beam.number),
+                beam.name,
+                beam.kind,
+                f"{beam.gantry:.0f}",
+                f"{beam.table:.0f}",
+                f"{beam.collimator:.0f}",
+                off_text,
+                "" if d_val is None else f"{d_val:.2f}",
+                result_text,
+            ]
+            type_rank = _type_rank(beam.kind)
+            has_d = 0 if d_val is not None else 1
+            d_sort = d_val if d_val is not None else 0.0
+            result_rank = {"pass": 0, "fail": 1, "missing": 2, "na": 3, "running": 4}.get(
+                result_kind, 5
+            )
+            g_sort = angle_sort_key(beam.gantry, p.nominal_gantry_angles)
+            t_sort = angle_sort_key(beam.table, p.nominal_table_angles)
+            c_sort = angle_sort_key(beam.collimator, p.nominal_collimator_angles)
+            keys = [
+                (beam.number,),
+                (beam.name.lower(), beam.number),
+                (type_rank, g_sort, t_sort, c_sort),
+                (g_sort, type_rank, t_sort, c_sort),
+                (t_sort, type_rank, g_sort, c_sort),
+                (c_sort, type_rank, g_sort, t_sort),
+                (has_d, d_sort),
+                (has_d, d_sort),
+                (result_rank, d_sort),
+            ]
+            if path is not None:
+                tip = path.name
+            elif beam.number in self.ignore_beams:
+                tip = f"Ignored beam {beam.number} ({beam.name})"
+            else:
+                tip = f"No RI for beam {beam.number} ({beam.name})"
+            for col, text in enumerate(values):
+                cell = _SortItem(text, keys[col], path if col == 0 else None)
+                cell.setToolTip(tip)
+                cell.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                if col == 7 and result_kind in ("pass", "fail"):
+                    self._paint_result_cell(cell, result_kind)
+                if col == 8 and result_kind:
+                    self._paint_result_cell(cell, result_kind)
+                self.table.setItem(row, col, cell)
+        return max_d, n_fail
+
+    def _fill_file_table(self) -> tuple[float, int]:
+        by_path = {Path(i.DCM).resolve(): i for i in self.items}
+        self.table.setRowCount(len(self.files))
+        max_d = 0.0
+        n_fail = 0
+        p = self.analysis_params
+        for row, path in enumerate(self.files):
+            item = by_path.get(path.resolve())
+            setup = self.setups.get(path.resolve())
+            values = [str(row + 1), "", "", "", "", "", "", "", ""]
+            passed = None
+            kind = ""
+            gantry = table = coll = 0.0
+            d_val: float | None = None
+            result_kind = ""
+            name = ""
+            if item:
+                d_val = item.calc_norm_of_bb_offset_from_field_center()
+                max_d = max(max_d, d_val)
+                passed = d_val <= self.tol_mm
+                if not passed:
+                    n_fail += 1
+                off = item.bb_offset_from_field_center
+                kind = "MV" if item.MV else "kV"
+                gantry, table, coll = item.gantry, item.table, item.collimator
+                name = gtc_beam_name(gantry, table, coll, p)
+                values = [
+                    str(row + 1),
+                    name,
+                    kind,
+                    display_angle(gantry, p.nominal_gantry_angles),
+                    display_angle(table, p.nominal_table_angles),
+                    display_angle(coll, p.nominal_collimator_angles),
+                    f"{off[0]:.2f}, {off[1]:.2f}",
+                    f"{d_val:.2f}",
+                    "Pass" if passed else "Fail",
+                ]
+                result_kind = "pass" if passed else "fail"
+            elif self._analysis_running:
+                if setup:
+                    kind = setup.kind if setup.kind in ("MV", "kV") else ""
+                    gantry, table, coll = setup.gantry, setup.table, setup.collimator
+                    name = gtc_beam_name(gantry, table, coll, p)
+                    values = [
+                        str(row + 1),
+                        name,
+                        kind,
+                        display_angle(gantry, p.nominal_gantry_angles),
+                        display_angle(table, p.nominal_table_angles),
+                        display_angle(coll, p.nominal_collimator_angles),
+                        "",
+                        "",
+                        "Running",
+                    ]
+                else:
+                    values = [str(row + 1), "", "", "", "", "", "", "", "Running"]
+                result_kind = "running"
+            elif setup:
+                kind = setup.kind if setup.kind in ("MV", "kV") else ""
+                gantry, table, coll = setup.gantry, setup.table, setup.collimator
+                name = gtc_beam_name(gantry, table, coll, p)
+                values = [
+                    str(row + 1),
+                    name,
+                    kind,
+                    display_angle(gantry, p.nominal_gantry_angles),
+                    display_angle(table, p.nominal_table_angles),
+                    display_angle(coll, p.nominal_collimator_angles),
+                    "",
+                    "",
+                    "",
+                ]
+            type_rank = _type_rank(kind)
+            has_d = 0 if d_val is not None else 1
+            d_sort = d_val if d_val is not None else 0.0
+            result_rank = 0 if passed is True else 1 if passed is False else 2
+            g_sort = angle_sort_key(gantry, p.nominal_gantry_angles)
+            t_sort = angle_sort_key(table, p.nominal_table_angles)
+            c_sort = angle_sort_key(coll, p.nominal_collimator_angles)
+            keys = [
+                (row,),
+                (name.lower(), g_sort, t_sort, c_sort),
+                (type_rank, g_sort, t_sort, c_sort),
+                (g_sort, type_rank, t_sort, c_sort),
+                (t_sort, type_rank, g_sort, c_sort),
+                (c_sort, type_rank, g_sort, t_sort),
+                (has_d, d_sort),
+                (has_d, d_sort),
+                (result_rank, d_sort),
+            ]
+            for col, text in enumerate(values):
+                cell = _SortItem(text, keys[col], path if col == 0 else None)
+                cell.setToolTip(path.name)
+                cell.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                if result_kind and col in (7, 8):
+                    self._paint_result_cell(cell, result_kind)
+                self.table.setItem(row, col, cell)
+        return max_d, n_fail
+
+    def _update_summary(self, max_d: float, n_fail: int) -> None:
         label = case_display_name(self.folder)
-        if self.items:
+        missing = [
+            b
+            for b in self.plan_beams
+            if b.number not in self.beam_ri and b.number not in self.ignore_beams
+        ]
+        required_missing = missing_required_beams(
+            self.plan_beams, self.beam_ri, self.ignore_beams
+        )
+        n_show = len(self.items) if self.items else len(self.beam_ri) if self.plan_beams else len(self.files)
+        if self.items or (self.all_ri_required and required_missing):
+            operator = self.items[0].user if self.items else ""
             self.summary.set_results(
                 case=label,
-                n_images=len(self.items),
+                n_images=n_show,
                 max_d=max_d,
                 tol=self.tol_mm,
-                passed=n_fail == 0,
-                operator=self.items[0].user,
+                passed=self._case_passed(n_fail),
+                operator=operator,
             )
-        elif self.files:
-            self.summary.set_message(
-                f"{len(self.files)} RI images loaded. Run Analysis, or open a folder that already has result.txt.",
-                title=label or "Folder loaded",
-            )
+            if missing:
+                extra = ", ".join(f"{b.number} {b.name}" for b in missing)
+                self.summary.hint.setText(
+                    f"Missing RI for beam(s): {extra}."
+                    + (
+                        " ALL_RI_IMAGE_REQUIRED: case fails."
+                        if self.all_ri_required and required_missing
+                        else " Not required for pass."
+                    )
+                )
+                self.summary.hint.show()
+        elif self.files or self.plan_beams:
+            msg = f"{len(self.files)} RI images loaded. Run Analysis, or open a folder that already has result.txt."
+            if self.plan_beams:
+                msg = (
+                    f"{len(self.beam_ri)} of {len(self.plan_beams)} plan beams have RI images. "
+                    "Run Analysis, or open a case that already has result.txt."
+                )
+                if missing:
+                    msg += " Missing: " + ", ".join(f"{b.number} {b.name}" for b in missing) + "."
+            self.summary.set_message(msg, title=label or "Folder loaded")
 
     def _current_path(self) -> Path | None:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if rows:
-            idx = rows[0].row()
-            if 0 <= idx < len(self.files):
-                return self.files[idx]
+        if not rows:
+            return None
+        item = self.table.item(rows[0].row(), 0)
+        if item is not None:
+            stored = item.data(Qt.UserRole)
+            if stored:
+                return Path(str(stored))
+        if self.plan_beams:
+            return None
+        idx = rows[0].row()
+        if 0 <= idx < len(self.files):
+            return self.files[idx]
         return None
 
     def _on_row_selected(self):
         path = self._current_path()
         if path is not None:
             self._show_file(path)
+            return
+        self.viewer.clear()
+        self.statusBar().showMessage("No RI image for this beam")
 
     def _step_image(self, delta: int):
-        if not self.files:
+        n = self.table.rowCount()
+        if n <= 0:
             return
         row = 0
-        current = self._current_path()
-        if current is not None:
-            row = self.files.index(current)
-        self.table.selectRow((row + delta) % len(self.files))
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if rows:
+            row = rows[0].row()
+        self.table.selectRow((row + delta) % n)
 
     def _modality_for_path(self, path: Path) -> str:
         item = next((i for i in self.items if Path(i.DCM).resolve() == path.resolve()), None)
         if item is not None:
             return "MV" if item.MV else "kV"
-        kind = classify_rt_image(path)
+        setup = self.setups.get(path.resolve())
+        if setup is not None and setup.kind in ("MV", "kV"):
+            return setup.kind
+        kind = classify_rt_image(path, self.analysis_params)
         return kind if kind in ("MV", "kV") else "MV"
 
     def _wl_key(self, kind: str, modality: str) -> str:
@@ -789,7 +1577,7 @@ class MainWindow(QMainWindow):
     def _show_file(self, path: Path):
         try:
             style = self.view_style.currentData() or "log"
-            image = load_ri_for_display(path, style)
+            image = load_ri_for_display(path, style, params=self.analysis_params)
             arr, origin, spacing = sitk_to_array(image)
             vmin, vmax = float(arr.min()), float(arr.max())
             modality = self._modality_for_path(path)
@@ -808,7 +1596,7 @@ class MainWindow(QMainWindow):
             item = next((i for i in self.items if Path(i.DCM).resolve() == path.resolve()), None)
             markers = []
             if item and item.sid_mm:
-                scale = 1000.0 / item.sid_mm
+                scale = self.analysis_params.sad_mm / item.sid_mm
                 fc = [item.field_center[0] / scale, item.field_center[1] / scale]
                 bb = [item.bb_center[0] / scale, item.bb_center[1] / scale]
                 markers.append((fc[0], fc[1], QColor(255, 0, 0)))
@@ -839,15 +1627,16 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Winston-Lutz viewer",
-            "Open Folder: choose a directory that contains RI.*.dcm files.\n"
+            "Open Case: pick a machine and case (RI files are listed in the dialog).\n"
+            "Settings: Institution and per-machine folders, plan file, and analysis parameters.\n"
             "Run Analysis: detect field and BB centers (writes {file}_out).\n"
             "View Report: open report.html in the browser.\n\n"
             "Pan: drag with the left mouse button.\n"
             "Zoom: mouse wheel, or Zoom In/Out.\n"
             "Window/Level: sliders, or Shift+drag / right-drag on the image.\n\n"
             "View:\n"
-            "  Report crop = 50 mm center crop, min-max to 8-bit (result.png).\n"
-            "  Report LoG = same crop, then Laplacian-of-Gaussian (C++ result.png).\n"
+            "  Report crop = 50 mm center crop, min-max to 8-bit.\n"
+            "  Report LoG = same crop, then Laplacian-of-Gaussian (used in result.png / HTML reports).\n"
             "  Full image = entire DICOM, min-max to 8-bit.\n\n"
             "Red cross = radiation field center.\n"
             "Green cross = BB center.",

@@ -48,6 +48,37 @@ class Param:
             return default
         return int(text)
 
+    def set_value(self, key: str, value: str) -> None:
+        """Create or update key=value, preserving comments and other keys."""
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        key = key.strip()
+        value = str(value).strip()
+        key_l = key.lower()
+        if self.file.is_file():
+            lines = self.file.read_text(encoding="utf-8", errors="replace").splitlines()
+        else:
+            lines = [
+                "# Winston-Lutz settings.",
+                "",
+            ]
+        found = False
+        out: list[str] = []
+        for raw in lines:
+            stripped = raw.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k, _rest = stripped.split("=", 1)
+                if k.strip().lower() == key_l:
+                    indent = raw[: len(raw) - len(raw.lstrip())]
+                    out.append(f"{indent}{k.strip()}={value}")
+                    found = True
+                    continue
+            out.append(raw)
+        if not found:
+            if out and out[-1].strip():
+                out.append("")
+            out.append(f"{key}={value}")
+        self.file.write_text("\n".join(out) + "\n", encoding="utf-8")
+
 
 def find_machine_config(case_dir: Path) -> Path | None:
     """Look for config.txt in the case folder, then each parent (machine folder)."""

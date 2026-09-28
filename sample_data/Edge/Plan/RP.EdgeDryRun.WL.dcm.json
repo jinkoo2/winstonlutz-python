@@ -1,0 +1,94 @@
+{
+  "beams": [
+    {
+      "number": 1,
+      "name": "G180E",
+      "kind": "MV",
+      "gantry": 180.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 2,
+      "name": "CBCT",
+      "kind": "kV",
+      "gantry": 0.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "SETUP",
+      "energy": "6"
+    },
+    {
+      "number": 3,
+      "name": "G90",
+      "kind": "MV",
+      "gantry": 90.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 4,
+      "name": "G0",
+      "kind": "MV",
+      "gantry": 0.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 5,
+      "name": "G270",
+      "kind": "MV",
+      "gantry": 270.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 6,
+      "name": "G180E_T50",
+      "kind": "MV",
+      "gantry": 180.0,
+      "table": 50.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 7,
+      "name": "G180E_T310",
+      "kind": "MV",
+      "gantry": 180.0,
+      "table": 310.0,
+      "collimator": 0.0,
+      "delivery": "TREATMENT",
+      "energy": "6"
+    },
+    {
+      "number": 8,
+      "name": "G90 kV",
+      "kind": "kV",
+      "gantry": 90.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "SETUP",
+      "energy": "6"
+    },
+    {
+      "number": 9,
+      "name": "G0 kV",
+      "kind": "kV",
+      "gantry": 0.0,
+      "table": 0.0,
+      "collimator": 0.0,
+      "delivery": "SETUP",
+      "energy": "6"
+    }
+  ]
+}

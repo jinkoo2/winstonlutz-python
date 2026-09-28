@@ -19,19 +19,238 @@ logger = logging.getLogger(__name__)
 
 CROP_MM = 50.0
 DEFAULT_SID_MM = 1500.0
+DEFAULT_SAD_MM = 1000.0
 # Varian stores 6 MV as KVP=6000. Diagnostic kV images are typically 70–140.
 MV_KVP_MIN = 1000.0
+MV_IMAGE_SIZE = (1190, 1190)  # columns, rows
+KV_IMAGE_SIZE = (1024, 768)
 
 
 class AnalysisSkip(Exception):
     """DICOM did not match the requested tag criteria."""
 
 
-def read_kvp(dcm_file: str | Path) -> float | None:
-    """Read beam energy (kV) from ExposureSequence or top-level KVP."""
-    import pydicom
+@dataclass(frozen=True)
+class AnalysisParams:
+    """Per-machine geometry and classification knobs (defaults match winston_lutz_2d)."""
 
-    ds = pydicom.dcmread(str(dcm_file), stop_before_pixels=True)
+    crop_mm: float = CROP_MM
+    crop_mm_y: float = CROP_MM
+    sad_mm: float = DEFAULT_SAD_MM
+    default_sid_mm: float = DEFAULT_SID_MM
+    mv_field_search_method: str = "Otsu"
+    kv_field_search_method: str = "ImageCenter"
+    mv_kvp_min: float = MV_KVP_MIN
+    mv_image_size: tuple[int, int] = MV_IMAGE_SIZE
+    kv_image_size: tuple[int, int] = KV_IMAGE_SIZE
+    nominal_gantry_angles: tuple[float, ...] = ()
+    nominal_table_angles: tuple[float, ...] = ()
+    nominal_collimator_angles: tuple[float, ...] = ()
+
+
+def _as_float(value, default: float) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_choice(value, allowed: tuple[str, ...], default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    for item in allowed:
+        if text.lower() == item.lower():
+            return item
+    compact = text.replace(" ", "").replace("_", "").lower()
+    aliases = {
+        "otsuthreshold": "Otsu",
+        "imagecentre": "ImageCenter",
+        "panelcenter": "ImageCenter",
+        "none": "ImageCenter",
+    }
+    mapped = aliases.get(compact)
+    if mapped in allowed:
+        return mapped
+    return default
+
+
+def _as_size(value, default: tuple[int, int]) -> tuple[int, int]:
+    if value in (None, ""):
+        return default
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return default
+    text = str(value).strip().lower().replace(" ", "")
+    if "x" in text:
+        left, right = text.split("x", 1)
+        try:
+            return int(left), int(right)
+        except ValueError:
+            return default
+    return default
+
+
+def _as_angles(value) -> tuple[float, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        parts = str(value).replace(";", ",").split(",")
+    out: list[float] = []
+    for item in parts:
+        if item in (None, ""):
+            continue
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def wrap_deg(angle: float) -> float:
+    """Map an angle onto [0, 360). 360 becomes 0."""
+    a = float(angle) % 360.0
+    if a < 0:
+        a += 360.0
+    if abs(a - 360.0) < 1e-9:
+        return 0.0
+    return a
+
+
+def circular_distance_deg(a: float, b: float) -> float:
+    d = abs(wrap_deg(a) - wrap_deg(b)) % 360.0
+    return min(d, 360.0 - d)
+
+
+def snap_index(actual: float, nominals: tuple[float, ...] | list[float]) -> int:
+    """Index of the closest nominal angle (circular). Empty list → -1. Ties keep the earlier entry."""
+    if not nominals:
+        return -1
+    best_i = 0
+    best_d = circular_distance_deg(actual, nominals[0])
+    for i, nom in enumerate(nominals):
+        d = circular_distance_deg(actual, nom)
+        if d + 1e-12 < best_d:
+            best_d = d
+            best_i = i
+    return best_i
+
+
+def snap_angle(actual: float, nominals: tuple[float, ...] | list[float]) -> float:
+    """Nearest nominal angle, or ``actual`` if the list is empty. 360 → 0."""
+    idx = snap_index(actual, nominals)
+    if idx < 0:
+        return actual
+    return wrap_deg(nominals[idx])
+
+
+def display_angle(
+    actual: float,
+    nominals: tuple[float, ...] | list[float],
+    *,
+    decimals: int = 1,
+) -> str:
+    """Snapped whole degrees when a list is set; otherwise the raw angle."""
+    if nominals:
+        return f"{snap_angle(actual, nominals):.0f}"
+    return f"{actual:.{decimals}f}"
+
+
+def gtc_beam_name(
+    gantry: float,
+    table: float,
+    collimator: float,
+    params: AnalysisParams | None = None,
+) -> str:
+    """Fallback beam label when no RT Plan is configured: ``G180_T0_C0``."""
+    params = params or AnalysisParams()
+    g = display_angle(gantry, params.nominal_gantry_angles)
+    t = display_angle(table, params.nominal_table_angles)
+    c = display_angle(collimator, params.nominal_collimator_angles)
+    return f"G{g}_T{t}_C{c}"
+
+
+def angle_sort_key(actual: float, nominals: tuple[float, ...] | list[float]):
+    """List order when nominals exist; otherwise the raw angle."""
+    idx = snap_index(actual, nominals)
+    if idx < 0:
+        return actual
+    return idx
+
+
+def use_field_mask(kind: str, params: AnalysisParams) -> bool:
+    """True when field center is measured (Otsu + COM), not taken as image center.
+
+    kV currently only supports ``ImageCenter`` (panel origin ``(0, 0)``).
+    """
+    if kind == "MV":
+        method = (params.mv_field_search_method or "Otsu").replace(" ", "").lower()
+        return method not in ("imagecenter", "none", "no")
+    method = (params.kv_field_search_method or "ImageCenter").replace(" ", "").lower()
+    return method in ("otsu", "otsuthreshold")
+
+
+def _crop_pair(value) -> tuple[float, float]:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return _as_float(value[0], CROP_MM), _as_float(value[1], CROP_MM)
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        v = _as_float(value[0], CROP_MM)
+        return v, v
+    v = _as_float(value, CROP_MM)
+    return v, v
+
+
+def analysis_params_from_machine(machine: dict | None) -> AnalysisParams:
+    """Read analysis knobs from a MACHINES entry; missing keys keep C++ defaults."""
+    if not machine:
+        return AnalysisParams()
+    crop_x, crop_y = _crop_pair(machine.get("crop_mm", CROP_MM))
+    return AnalysisParams(
+        crop_mm=crop_x,
+        crop_mm_y=crop_y,
+        sad_mm=_as_float(machine.get("sad_mm"), DEFAULT_SAD_MM),
+        default_sid_mm=_as_float(machine.get("default_sid_mm"), DEFAULT_SID_MM),
+        mv_field_search_method=_as_choice(
+            machine.get("MV_field_search_method"), ("Otsu",), "Otsu"
+        ),
+        kv_field_search_method=_as_choice(
+            machine.get("kV_field_search_method"), ("ImageCenter",), "ImageCenter"
+        ),
+        mv_kvp_min=_as_float(machine.get("MV_kvp_min"), MV_KVP_MIN),
+        mv_image_size=_as_size(machine.get("MV_image_size"), MV_IMAGE_SIZE),
+        kv_image_size=_as_size(machine.get("kV_image_size"), KV_IMAGE_SIZE),
+        nominal_gantry_angles=_as_angles(machine.get("nominal_gantry_angles")),
+        nominal_table_angles=_as_angles(machine.get("nominal_table_angles")),
+        nominal_collimator_angles=_as_angles(machine.get("nominal_collimator_angles")),
+    )
+
+
+@dataclass(frozen=True)
+class RiSetup:
+    """Acquisition geometry from an RI DICOM header (no analysis results)."""
+
+    kind: str | None = None
+    gantry: float = 0.0
+    table: float = 0.0
+    collimator: float = 0.0
+
+
+def _dicom_float(value, default: float = 0.0) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(str(value).split("\\")[0].strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _kvp_from_dataset(ds) -> float | None:
     candidates = []
     if getattr(ds, "ExposureSequence", None):
         for item in ds.ExposureSequence:
@@ -40,43 +259,73 @@ def read_kvp(dcm_file: str | Path) -> float | None:
     if getattr(ds, "KVP", None) not in (None, ""):
         candidates.append(ds.KVP)
     for raw in candidates:
-        try:
-            return float(str(raw).split("\\")[0].strip())
-        except ValueError:
-            continue
+        parsed = _dicom_float(raw, default=float("nan"))
+        if parsed == parsed:  # not NaN
+            return parsed
     return None
 
 
-def classify_rt_image(dcm_file: str | Path) -> str | None:
-    """Return ``MV`` or ``kV``. Prefer energy; fall back to label/description, then size."""
-    import pydicom
-
-    kvp = read_kvp(dcm_file)
+def _kind_from_dataset(ds, name: str, params: AnalysisParams | None = None) -> str | None:
+    params = params or AnalysisParams()
+    kvp = _kvp_from_dataset(ds)
     if kvp is not None:
-        kind = "MV" if kvp >= MV_KVP_MIN else "kV"
-        logger.info("classified %s as %s from KVP=%.0f", Path(dcm_file).name, kind, kvp)
+        kind = "MV" if kvp >= params.mv_kvp_min else "kV"
+        logger.info("classified %s as %s from KVP=%.0f", name, kind, kvp)
         return kind
 
-    ds = pydicom.dcmread(str(dcm_file), stop_before_pixels=True)
     desc = str(getattr(ds, "RTImageDescription", "") or "").upper()
     label = str(getattr(ds, "RTImageLabel", "") or "").upper()
     if "[MV]" in desc or label.startswith("MV"):
-        logger.info("classified %s as MV from RT image label/description", Path(dcm_file).name)
+        logger.info("classified %s as MV from RT image label/description", name)
         return "MV"
     if "[KV]" in desc or label.startswith("KV"):
-        logger.info("classified %s as kV from RT image label/description", Path(dcm_file).name)
+        logger.info("classified %s as kV from RT image label/description", name)
         return "kV"
 
     rows = int(getattr(ds, "Rows", 0) or 0)
     cols = int(getattr(ds, "Columns", 0) or 0)
-    if rows == 1190 and cols == 1190:
-        logger.info("classified %s as MV from image size %sx%s", Path(dcm_file).name, cols, rows)
+    mv_cols, mv_rows = params.mv_image_size
+    kv_cols, kv_rows = params.kv_image_size
+    if mv_cols and mv_rows and cols == mv_cols and rows == mv_rows:
+        logger.info("classified %s as MV from image size %sx%s", name, cols, rows)
         return "MV"
-    if rows == 768 and cols == 1024:
-        logger.info("classified %s as kV from image size %sx%s", Path(dcm_file).name, cols, rows)
+    if kv_cols and kv_rows and cols == kv_cols and rows == kv_rows:
+        logger.info("classified %s as kV from image size %sx%s", name, cols, rows)
         return "kV"
-    logger.info("could not classify %s (no energy, unrecognized size %sx%s)", Path(dcm_file).name, cols, rows)
+    logger.info("could not classify %s (no energy, unrecognized size %sx%s)", name, cols, rows)
     return None
+
+
+def read_kvp(dcm_file: str | Path) -> float | None:
+    """Read beam energy (kV) from ExposureSequence or top-level KVP."""
+    import pydicom
+
+    ds = pydicom.dcmread(str(dcm_file), stop_before_pixels=True)
+    return _kvp_from_dataset(ds)
+
+
+def read_ri_setup(dcm_file: str | Path, params: AnalysisParams | None = None) -> RiSetup:
+    """Read Type / Gantry / Table / Coll from DICOM tags without pixel data."""
+    import pydicom
+
+    params = params or AnalysisParams()
+    path = Path(dcm_file)
+    ds = pydicom.dcmread(str(path), stop_before_pixels=True)
+    gantry = _dicom_float(getattr(ds, "GantryAngle", None))
+    collimator = _dicom_float(getattr(ds, "BeamLimitingDeviceAngle", None))
+    couch_raw = getattr(ds, "PatientSupportAngle", None)
+    table = 360.0 - _dicom_float(couch_raw) if couch_raw not in (None, "") else 0.0
+    return RiSetup(
+        kind=_kind_from_dataset(ds, path.name, params),
+        gantry=gantry,
+        table=table,
+        collimator=collimator,
+    )
+
+
+def classify_rt_image(dcm_file: str | Path, params: AnalysisParams | None = None) -> str | None:
+    """Return ``MV`` or ``kV``. Prefer energy; fall back to label/description, then size."""
+    return read_ri_setup(dcm_file, params).kind
 
 
 def normalize_bb_method(name: str) -> str:
@@ -200,11 +449,17 @@ def _center_of_mass(mask: sitk.Image) -> list[float]:
     return [dx, dy]
 
 
-def _crop_center(image: sitk.Image, crop_mm: float = CROP_MM) -> sitk.Image:
+def _crop_center(
+    image: sitk.Image,
+    crop_mm: float = CROP_MM,
+    crop_mm_y: float | None = None,
+) -> sitk.Image:
     spacing = image.GetSpacing()
     size = image.GetSize()
-    width = int(crop_mm / spacing[0])
-    height = int(crop_mm / spacing[1])
+    crop_x = float(crop_mm)
+    crop_y = float(crop_mm if crop_mm_y is None else crop_mm_y)
+    width = int(crop_x / spacing[0])
+    height = int(crop_y / spacing[1])
     if width % 2 != 0:
         width += 1
     if height % 2 != 0:
@@ -305,9 +560,10 @@ def _draw_cross(rgb: np.ndarray, image: sitk.Image, point: list[float], color: t
 def prepare_display_image(image: sitk.Image, style: str = "rescale") -> sitk.Image:
     """Build the 8-bit image used in reports.
 
-    ``rescale`` matches Python ``result.png`` / C++ ``result2.png``: crop is
-    assumed already applied, then min-max stretch to 0–255.
-    ``log`` matches C++ ``result.png``: Laplacian-of-Gaussian (σ=1), then stretch.
+    ``rescale`` matches C++ ``result2.png``: crop is assumed already applied,
+    then min-max stretch to 0–255.
+    ``log`` matches the GUI **Report LoG** view and ``result.png``: LoG (σ=1),
+    then stretch to 0–255.
     """
     image = _as_2d(image)
     if style == "log":
@@ -315,24 +571,29 @@ def prepare_display_image(image: sitk.Image, style: str = "rescale") -> sitk.Ima
     return sitk.Cast(sitk.RescaleIntensity(image, 0, 255), sitk.sitkUInt8)
 
 
-def load_ri_for_display(dcm_file: str | Path, style: str = "rescale") -> sitk.Image:
+def load_ri_for_display(
+    dcm_file: str | Path,
+    style: str = "rescale",
+    params: AnalysisParams | None = None,
+) -> sitk.Image:
     """Load an RI DICOM the same way analysis does, then make a display image.
 
     ``full`` keeps the whole frame (min-max 8-bit). ``rescale`` and ``log``
-    crop 50 mm about the image center first, like the report.
+    crop about the image center first, like the report.
     """
+    params = params or AnalysisParams()
     reader = sitk.ImageFileReader()
     reader.SetImageIO("GDCMImageIO")
     reader.SetFileName(str(dcm_file))
     image = _set_origin_to_center(_as_2d(reader.Execute()))
     if style == "full":
         return prepare_display_image(image, "rescale")
-    cropped = _crop_center(image)
+    cropped = _crop_center(image, params.crop_mm, params.crop_mm_y)
     return prepare_display_image(cropped, style)
 
 
 def _save_overlay(image: sitk.Image, field_center: list[float], bb_center: list[float], path: Path) -> None:
-    gray = prepare_display_image(image, "rescale")
+    gray = prepare_display_image(image, "log")
     arr = sitk.GetArrayFromImage(gray)
     rgb = np.stack([arr, arr, arr], axis=-1)
     _draw_cross(rgb, image, field_center, (255, 0, 0))
@@ -386,12 +647,17 @@ def analyze_image(
     match_criteria: str = "",
     preprocess: bool = False,
     write_debug: bool = True,
+    params: AnalysisParams | None = None,
+    is_mv: bool | None = None,
 ) -> AnalysisResult:
     """Run Winston-Lutz analysis on one RI DICOM.
 
     ``bb_search`` is ``bb_search_LoG``, ``bb_search_ConnectedComponent``,
     or ``bb_search_OtsuThreshold`` (the ``bb_search_`` prefix is optional).
+    ``params`` supplies crop, SAD/SID fallbacks, and related machine knobs.
+    ``is_mv`` is the MV/kV classification; if omitted, it follows field search.
     """
+    params = params or AnalysisParams()
     dcm_file = Path(dcm_file)
     if out_dir is None:
         out_dir = Path(str(dcm_file) + "_out")
@@ -400,6 +666,7 @@ def analyze_image(
 
     method = bb_search.replace("bb_search_", "")
     do_field = field_search == "field_search_yes"
+    classified_mv = do_field if is_mv is None else bool(is_mv)
 
     reader = sitk.ImageFileReader()
     reader.SetImageIO("GDCMImageIO")
@@ -411,11 +678,12 @@ def analyze_image(
     if not _match_criteria(reader, match_criteria):
         raise AnalysisSkip(f"DICOM tag criteria not matched: {match_criteria}")
 
-    gantry = _parse_float(_tag(reader, "300a|011e"))
-    col = _parse_float(_tag(reader, "300a|0120"))
+    gantry = snap_angle(_parse_float(_tag(reader, "300a|011e")), params.nominal_gantry_angles)
+    col = snap_angle(_parse_float(_tag(reader, "300a|0120")), params.nominal_collimator_angles)
     couch = _parse_float(_tag(reader, "300a|0122"))
     table = 360.0 - couch if _tag(reader, "300a|0122") else 0.0
-    sid_mm = _parse_float(_tag(reader, "3002|0026"), DEFAULT_SID_MM)
+    table = snap_angle(table, params.nominal_table_angles)
+    sid_mm = _parse_float(_tag(reader, "3002|0026"), params.default_sid_mm)
     operator = _tag(reader, "0008|1070")
 
     if write_debug:
@@ -424,7 +692,7 @@ def analyze_image(
     if preprocess:
         image = _preprocess(image)
 
-    image = _crop_center(image)
+    image = _crop_center(image, params.crop_mm, params.crop_mm_y)
     if write_debug:
         sitk.WriteImage(image, str(out_dir / "img1.mhd"))
 
@@ -454,7 +722,7 @@ def analyze_image(
         sitk.WriteImage(bb_mask, str(out_dir / "img.bb.mask.mhd"))
 
     diff = [bb_center[0] - field_center[0], bb_center[1] - field_center[1]]
-    scale = 1000.0 / sid_mm if sid_mm else 1.0
+    scale = params.sad_mm / sid_mm if sid_mm else 1.0
     field_iso = [field_center[0] * scale, field_center[1] * scale]
     bb_iso = [bb_center[0] * scale, bb_center[1] * scale]
     diff_iso = [diff[0] * scale, diff[1] * scale]
@@ -473,7 +741,7 @@ def analyze_image(
         bb_offset=diff_iso,
         field_center_image=field_center,
         bb_center_image=bb_center,
-        mv=do_field,
+        mv=classified_mv,
         out_dir=str(out_dir),
         bb_search=normalize_bb_method(method),
     )

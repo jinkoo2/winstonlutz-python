@@ -53,10 +53,13 @@ from .app_settings import (
     find_machine_for_folder,
     get_institution,
     get_machines,
+    is_simple_run_mode,
     load_gui_settings,
     save_gui_settings,
+    simple_machine_name,
 )
 from .image_viewer import ImageViewer, sitk_to_array
+from .logutil import configure_logging
 from .models import WinstonLutzItem
 from .pipeline import (
     analyze_folder,
@@ -118,14 +121,7 @@ def machine_name(folder: Path | None) -> str:
     """Machine folder name, skipping a Data parent. e.g. Edge."""
     if folder is None:
         return ""
-    folder = Path(folder)
-    parent = folder.parent
-    name = parent.name
-    if name.lower() == "data":
-        name = parent.parent.name
-    if not name or name in (".", ""):
-        return ""
-    return name
+    return simple_machine_name(folder)
 
 
 def window_title(case: str = "") -> str:
@@ -355,7 +351,7 @@ class SummaryBanner(QFrame):
         result_font.setPointSize(16)
         result_font.setBold(True)
         self.result.setFont(result_font)
-        self.hint = QLabel("Open Case: choose a machine and a case with RI images.")
+        self.hint = QLabel("Open Case: choose a folder that contains RI images.")
         self.hint.setObjectName("summaryHint")
         self.hint.setWordWrap(True)
 
@@ -870,6 +866,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready")
         _restore_layout(self, self.settings, "main")
+        self._apply_run_mode_ui()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1022,24 +1019,43 @@ class MainWindow(QMainWindow):
         )
         return panel
 
+    def _apply_run_mode_ui(self) -> None:
+        self.setWindowTitle(
+            window_title(case_display_name(self.folder) if self.folder else "")
+        )
+        self._update_report_button()
+        if self.folder:
+            return
+        if is_simple_run_mode():
+            self.summary.hint.setText(
+                "Simple mode: Open Case picks a folder that contains RI.*.dcm files. "
+                "The parent folder is the machine name."
+            )
+        else:
+            self.summary.hint.setText(
+                "Open Case: choose a machine and a case with RI images."
+            )
+
     def open_settings(self):
         dlg = SettingsDialog(self)
         dlg.exec_()
         if not dlg.did_save:
             return
-        self.setWindowTitle(
-            window_title(case_display_name(self.folder) if self.folder else "")
-        )
+        self._apply_run_mode_ui()
         if self.folder:
             self.load_folder(self.folder)
 
     def open_case(self):
+        if is_simple_run_mode():
+            self._open_case_simple()
+            return
         machines = [m for m in get_machines() if str(m.get("NAME") or "").strip()]
         if not machines:
             QMessageBox.warning(
                 self,
                 "Open Case",
-                "No machines are defined. Open Settings and add at least one machine.",
+                "No machines are defined. Open Settings and add at least one machine, "
+                "or set RunMode to Simple.",
             )
             return
         last_machine = str(self.settings.value("last_machine", "") or "")
@@ -1050,10 +1066,37 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_machine", dlg.machine_combo.currentText())
         self.load_folder(dlg.selected_case)
 
+    def _open_case_simple(self):
+        last = str(self.settings.value("last_directory", "") or "")
+        start_path = Path(last).expanduser() if last else Path()
+        start = ""
+        if start_path.is_dir():
+            parent = start_path.parent
+            start = str(parent if parent.is_dir() else start_path)
+        elif start_path.parent.is_dir():
+            start = str(start_path.parent)
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select case folder (RI images)", start
+        )
+        if not chosen:
+            return
+        folder = Path(chosen)
+        if not list_ri_files(folder):
+            QMessageBox.warning(
+                self,
+                "Open Case",
+                f"No RI.*.dcm files in:\n{folder}",
+            )
+            return
+        machine = simple_machine_name(folder)
+        if machine:
+            self.settings.setValue("last_machine", machine)
+        self.load_folder(folder)
+
     def load_folder(self, folder: str | Path) -> bool:
         folder = Path(folder)
         files = list_ri_files(folder)
-        machine_cfg = find_machine_for_folder(folder)
+        machine_cfg = None if is_simple_run_mode() else find_machine_for_folder(folder)
         self.analysis_params = analysis_params_from_machine(machine_cfg)
         self.all_ri_required = machine_all_ri_required(machine_cfg)
         self.ignore_beams = machine_ignore_beams(machine_cfg)
@@ -1135,7 +1178,7 @@ class MainWindow(QMainWindow):
                 self.kv_method.setCurrentIndex(idx)
 
     def view_report(self):
-        if self.folder is None:
+        if self.folder is None or is_simple_run_mode():
             return
         path = find_html_report(self.folder)
         if path is None and self.items:
@@ -1162,6 +1205,9 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
     def _update_report_button(self):
+        if is_simple_run_mode():
+            self.report_act.setEnabled(False)
+            return
         has_report = self.folder is not None and find_html_report(self.folder) is not None
         can_build = bool(self.folder and self.items)
         self.report_act.setEnabled(has_report or can_build)
@@ -1198,7 +1244,7 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.run_act.setEnabled(True)
         self.items = items
-        if self.folder and items:
+        if self.folder and items and not is_simple_run_mode():
             n_fail = sum(
                 1
                 for i in items
@@ -1627,8 +1673,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Winston-Lutz viewer",
-            "Open Case: pick a machine and case (RI files are listed in the dialog).\n"
-            "Settings: Institution and per-machine folders, plan file, and analysis parameters.\n"
+            "Open Case: in Clinic mode, pick a machine and case. In Simple mode, pick the folder that contains RI.*.dcm files (the parent folder is the machine name).\n"
+            "Settings: Institution, RunMode, and per-machine folders, plan file, and analysis parameters.\n"
             "Run Analysis: detect field and BB centers (writes {file}_out).\n"
             "View Report: open report.html in the browser.\n\n"
             "Pan: drag with the left mouse button.\n"
@@ -1646,7 +1692,7 @@ class MainWindow(QMainWindow):
 def run_app(argv: list[str] | None = None, folder: str | Path | None = None) -> int:
     import sys
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging()
     args = list(argv if argv is not None else sys.argv)
     app = QApplication.instance() or QApplication(args)
     try:

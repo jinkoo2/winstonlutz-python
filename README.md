@@ -40,11 +40,47 @@ The tag must match `vMAJOR.MINOR.PATCH` (for example `v0.1.1`). Each release inc
 
 You can also run **Actions → Release → Run workflow** without a tag; that only uploads build artifacts, it does not create a GitHub Release.
 
-The GUI **Open Case** flow picks a machine from settings, then a case folder that contains `RI.*.dcm` files. **Settings** (toolbar, `Ctrl+,`) edits `Institution` and the `MACHINES` list (add/remove, folders, plan file, analysis knobs) and writes `winstonlutz.gui.settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
+The GUI **Open Case** flow depends on **RunMode**. In **Clinic** mode it picks a machine from settings, then a case folder that contains `RI.*.dcm` files. In **Simple** mode it opens a directory selector for that RI folder and uses the parent folder as the machine name (see [Simple run mode](#simple-run-mode)). **Settings** (toolbar, `Ctrl+,`) edits `Institution`, `RunMode`, and the `MACHINES` list (add/remove, folders, plan file, analysis knobs) and writes `winstonlutz.gui.settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
 
-Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executable. The window title shows `Institution`. Clinic email settings stay in each machine tree’s `app.config.txt` / `config.txt`. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
+Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executable. Daily logs go in `_logs/winstonlutz_YYYY-MM-DD.log` beside that file (created on startup; older than 7 days are deleted). If the folder cannot be created, file logging is skipped. CLI `-v` and `WINSTONLUTZ_LOG_LEVEL` raise the log level. The window title shows `Institution`. Clinic email settings stay in each machine tree’s `app.config.txt` / `config.txt`. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
 
 `validate-golden` re-runs analysis on `sample_data` and compares `result.txt` to the original C++ output (default tolerance 0.1 mm). The repo includes three machines (`Edge`, `Edge_Cone`, `TrueBeam`) with three cases each; analysis outputs (`*_out`, `report.html`) are kept for the newest case only.
+
+## Simple run mode
+
+The GUI starts in **Simple** mode when any of these is true:
+
+- `winstonlutz.gui.settings.json` is missing
+- `MACHINES` is missing or empty (no named machines)
+- top-level `"RunMode": "Simple"` (Settings → General)
+
+**Open Case** then shows a folder picker. Choose the directory that contains the `RI.*.dcm` files (a case folder). The **parent** of that folder is the machine name used in the window title and table header.
+
+Typical layout:
+
+```
+Edge/                      ← machine name
+  26-09-24_06-13-24/       ← select this folder
+    RI.*.dcm
+```
+
+If the parent is named `Data`, the grandparent is used instead, so the usual clinic tree still names the linac:
+
+```
+Edge/                      ← machine name
+  Data/
+    26-09-24_06-13-24/     ← select this folder
+      RI.*.dcm
+```
+
+Simple mode does not use the `MACHINES` list: no RT Plan table, no HTML report (View Report is disabled; the template path is unknown), and no per-machine crop/SID/BB defaults beyond the built-in analysis defaults. Beam **Name** is `Gxxx_Tyyy_Czzz` from the image angles. Switch **Settings → RunMode** to **Clinic** and add machines when you want the machine/case dialog, plan matching, HTML reports, and per-linac knobs.
+
+```json
+{
+  "Institution": "Stony Brook University Hospital",
+  "RunMode": "Simple"
+}
+```
 
 ## Machine settings (`winstonlutz.gui.settings.json`)
 
@@ -55,6 +91,11 @@ Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings →
 | Key | Meaning | When to adjust |
 |---|---|---|
 | `Institution` (top-level) | Shown in the GUI window title. | Set once per PC to the hospital name. |
+| `RunMode` (top-level) | `Clinic` (default) or `Simple`. Simple also applies when the settings file is missing or `MACHINES` is empty. | Use `Simple` for a one-folder Open Case picker without a machine list. |
+| `error_email_to` (top-level) | If set, uncaught exceptions and `logger.exception` events are emailed with traceback, host, version, and argv. Full address or a local part (with `email_domain`). Empty/missing = no error email. | `jinkoo.kim@stonybrookmedicine.edu` |
+| `email_from`, `email_domain`, `email_host_address`, `email_host_port`, `enable_ssl` | SMTP used for error emails (and required together with `error_email_to`). `email_from_enc_pw` stays in JSON if you need authenticated SMTP; leave empty for open relay. | Match clinic `app.config.txt`. |
+
+Copy `winstonlutz.gui.settings.sample.json` to `winstonlutz.gui.settings.json` next to the executable (the live file is gitignored). `settings.json` and `configs.json` are also gitignored; `configs.sample.json` is the SMTP-only template if you keep a separate overlay file locally.
 | `NAME` | Label in **Open Case** and in reports. | New machine, or to match the folder name under the data tree. |
 | `DATA_FOLDER` | Directory that contains case folders (`YY-MM-DD_HH-MM-SS`). | Path to that linac’s `Data` folder on this PC. |
 | `DICOM_PLAN_FILE` | Path to that machine’s RT Plan (`RP*.dcm`). When set, **Open Case** builds the table from plan beams (Beam, Name, Type, Gantry, Table, Coll) and matches each `RI.*.dcm` by `ReferencedBeamNumber`. The first read writes `{RP file}.json` beside it; later opens use that JSON unless the DICOM is newer or the JSON is missing. | Edge sample: `sample_data/Edge/Plan/RP.EdgeDryRun.WL.dcm`. Omit until you have a plan; the table is one row per RI and **Name** is `Gxxx_Tyyy_Czzz` from the snapped angles. |

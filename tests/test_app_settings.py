@@ -193,3 +193,60 @@ def test_default_machine_and_csv_numbers():
     assert parse_int_list("2, 7") == [2, 7]
     assert format_csv_numbers([270, 0, 90, 180]) == "270, 0, 90, 180"
     assert format_csv_numbers(50.0) == "50"
+
+
+def test_is_simple_run_mode(tmp_path, monkeypatch):
+    from winstonlutz.app_settings import (
+        is_simple_run_mode,
+        save_gui_settings,
+        simple_machine_name,
+    )
+
+    cfg = tmp_path / "winstonlutz.gui.settings.json"
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(cfg))
+    assert is_simple_run_mode() is True
+    save_gui_settings({})
+    assert is_simple_run_mode() is True
+    save_gui_settings({"Institution": "Test", "MACHINES": []})
+    assert is_simple_run_mode() is True
+    save_gui_settings({"MACHINES": [{"DATA_FOLDER": "x"}]})
+    assert is_simple_run_mode() is True
+    save_gui_settings({"MACHINES": [{"NAME": "Edge"}]})
+    assert is_simple_run_mode() is False
+    save_gui_settings({"RunMode": "Simple", "MACHINES": [{"NAME": "Edge"}]})
+    assert is_simple_run_mode() is True
+    save_gui_settings({"RunMode": "Clinic", "MACHINES": [{"NAME": "Edge"}]})
+    assert is_simple_run_mode() is False
+
+    case = tmp_path / "Edge" / "26-09-24_06-13-24"
+    case.mkdir(parents=True)
+    assert simple_machine_name(case) == "Edge"
+    nested = tmp_path / "Edge" / "Data" / "26-09-24_06-13-24"
+    nested.mkdir(parents=True)
+    assert simple_machine_name(nested) == "Edge"
+
+
+def test_error_email_settings_and_addresses():
+    from winstonlutz.emailer import error_email_settings, recipient_addresses
+
+    assert recipient_addresses("jinkoo.kim@stonybrookmedicine.edu") == [
+        "jinkoo.kim@stonybrookmedicine.edu"
+    ]
+    assert recipient_addresses("jinkoo.kim", "stonybrookmedicine.edu") == [
+        "jinkoo.kim@stonybrookmedicine.edu"
+    ]
+    assert error_email_settings({}) is None
+    assert error_email_settings({"error_email_to": "a@b.c"}) is None
+    cfg = error_email_settings(
+        {
+            "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
+            "email_from": "radonc.physics",
+            "email_domain": "stonybrookmedicine.edu",
+            "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+            "email_host_port": 25,
+            "enable_ssl": False,
+        }
+    )
+    assert cfg is not None
+    assert cfg["to"] == "jinkoo.kim@stonybrookmedicine.edu"
+    assert cfg["host"] == "uhmc-imail.uhmc.sunysb.edu"

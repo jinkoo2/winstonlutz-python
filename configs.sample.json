@@ -1,0 +1,8 @@
+{
+  "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
+  "email_from": "radonc.physics",
+  "email_domain": "stonybrookmedicine.edu",
+  "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+  "email_host_port": 25,
+  "enable_ssl": false
+}

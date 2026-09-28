@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -30,14 +31,19 @@ from PyQt5.QtWidgets import (
 
 from .app_settings import (
     BB_SEARCH_METHODS,
+    ERROR_EMAIL_TO_KEY,
     INSTITUTION_KEY,
     KV_FIELD_SEARCH_METHODS,
     MACHINES_KEY,
     MV_FIELD_SEARCH_METHODS,
+    RUN_MODE_CLINIC,
+    RUN_MODE_KEY,
+    RUN_MODES,
     default_machine,
     format_csv_numbers,
     get_institution,
     get_machines,
+    get_run_mode,
     load_gui_settings,
     parse_csv_numbers,
     parse_int_list,
@@ -313,6 +319,30 @@ class SettingsDialog(QDialog):
 
         self.institution = QLineEdit()
         self.institution.setText(get_institution())
+        self.run_mode = QComboBox()
+        self.run_mode.addItems(list(RUN_MODES))
+        mode_idx = self.run_mode.findText(get_run_mode(self._original))
+        self.run_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
+        self.error_email_to = QLineEdit()
+        self.error_email_to.setText(str(self._original.get(ERROR_EMAIL_TO_KEY) or ""))
+        self.error_email_to.setPlaceholderText("jinkoo.kim@stonybrookmedicine.edu")
+        self.email_from = QLineEdit()
+        self.email_from.setText(str(self._original.get("email_from") or ""))
+        self.email_domain = QLineEdit()
+        self.email_domain.setText(str(self._original.get("email_domain") or ""))
+        self.email_host = QLineEdit()
+        self.email_host.setText(str(self._original.get("email_host_address") or ""))
+        self.email_port = QSpinBox()
+        self.email_port.setRange(1, 65535)
+        try:
+            self.email_port.setValue(int(self._original.get("email_host_port") or 25))
+        except (TypeError, ValueError):
+            self.email_port.setValue(25)
+        self.email_ssl = QCheckBox("enable_ssl")
+        ssl_val = self._original.get("enable_ssl", False)
+        if isinstance(ssl_val, str):
+            ssl_val = ssl_val.strip().lower() in ("true", "1", "yes")
+        self.email_ssl.setChecked(bool(ssl_val))
         self.path_label = QLabel(str(user_config_path()))
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(True)
@@ -365,8 +395,21 @@ class SettingsDialog(QDialog):
         page = QWidget()
         form = QFormLayout(page)
         form.addRow("Institution", self.institution)
+        form.addRow("RunMode", self.run_mode)
+        form.addRow("error_email_to", self.error_email_to)
+        form.addRow("email_from", self.email_from)
+        form.addRow("email_domain", self.email_domain)
+        form.addRow("email_host_address", self.email_host)
+        form.addRow("email_host_port", self.email_port)
+        form.addRow("", self.email_ssl)
         form.addRow("Settings file", self.path_label)
-        hint = QLabel("Shown in the window title. Saved next to the executable.")
+        hint = QLabel(
+            "Clinic: Open Case picks a configured machine, then a case. "
+            "Simple: Open Case picks a folder of RI images; the parent folder is the machine name. "
+            "Simple is also used when this file is missing or MACHINES is empty. "
+            "If error_email_to is set (with email_from and email_host_address), uncaught exceptions "
+            "and logger.exception events are emailed."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #64748b;")
         form.addRow("", hint)
@@ -479,6 +522,13 @@ class SettingsDialog(QDialog):
         self._store_current()
         data = dict(self._original)
         data[INSTITUTION_KEY] = self.institution.text().strip()
+        data[RUN_MODE_KEY] = self.run_mode.currentText() or RUN_MODE_CLINIC
+        data[ERROR_EMAIL_TO_KEY] = self.error_email_to.text().strip()
+        data["email_from"] = self.email_from.text().strip()
+        data["email_domain"] = self.email_domain.text().strip()
+        data["email_host_address"] = self.email_host.text().strip()
+        data["email_host_port"] = self.email_port.value()
+        data["enable_ssl"] = self.email_ssl.isChecked()
         data[MACHINES_KEY] = copy.deepcopy(self._machines)
         return data
 

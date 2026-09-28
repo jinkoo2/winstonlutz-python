@@ -15,6 +15,11 @@ from pathlib import Path
 SETTINGS_NAME = "winstonlutz.gui.settings.json"
 MACHINES_KEY = "MACHINES"
 INSTITUTION_KEY = "Institution"
+RUN_MODE_KEY = "RunMode"
+RUN_MODE_CLINIC = "Clinic"
+RUN_MODE_SIMPLE = "Simple"
+RUN_MODES = (RUN_MODE_CLINIC, RUN_MODE_SIMPLE)
+ERROR_EMAIL_TO_KEY = "error_email_to"
 DEFAULT_CASE_FOLDER_REGEX = r"^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$"
 
 
@@ -78,6 +83,53 @@ def set_app_param(key: str, value) -> None:
 
 def get_institution() -> str:
     return str(get_app_param(INSTITUTION_KEY) or "").strip()
+
+
+def named_machines(machines) -> list[dict]:
+    if not isinstance(machines, list):
+        return []
+    return [m for m in machines if isinstance(m, dict) and str(m.get("NAME") or "").strip()]
+
+
+def get_run_mode(data: dict | None = None) -> str:
+    settings = data if data is not None else load_gui_settings()
+    text = str((settings or {}).get(RUN_MODE_KEY) or "").strip()
+    if text.lower() == RUN_MODE_SIMPLE.lower():
+        return RUN_MODE_SIMPLE
+    return RUN_MODE_CLINIC
+
+
+def is_simple_run_mode(data: dict | None = None) -> bool:
+    """True when Open Case should pick an RI folder instead of a machine list.
+
+    Simple mode if the settings file is missing, MACHINES is absent/empty, or
+    ``RunMode`` is ``Simple``.
+    """
+    path = user_config_path()
+    if not path.is_file():
+        return True
+    settings = data if data is not None else load_gui_settings()
+    if not settings:
+        return True
+    if get_run_mode(settings) == RUN_MODE_SIMPLE:
+        return True
+    return not named_machines(settings.get(MACHINES_KEY))
+
+
+def simple_machine_name(case_folder: str | Path) -> str:
+    """Machine name for Simple mode: parent of the case folder.
+
+    If that parent is named ``Data``, the grandparent is used
+    (``Edge/Data/26-09-24_...`` → ``Edge``).
+    """
+    folder = Path(case_folder)
+    parent = folder.parent
+    name = parent.name
+    if name.lower() == "data":
+        name = parent.parent.name
+    if not name or name in (".", ""):
+        return ""
+    return name
 
 
 def get_machines() -> list[dict]:

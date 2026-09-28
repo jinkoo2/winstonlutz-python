@@ -8,4 +8,7 @@ packaging/WinstonLutz.spec
 .venv/
 venv/
 .env
+/settings.json
+/configs.json
 /winstonlutz.gui.settings.json
+/_logs/

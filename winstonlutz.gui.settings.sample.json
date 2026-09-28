@@ -1,0 +1,36 @@
+{
+  "Institution": "Your Institution",
+  "RunMode": "Clinic",
+  "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
+  "email_from": "radonc.physics",
+  "email_domain": "stonybrookmedicine.edu",
+  "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+  "email_host_port": 25,
+  "enable_ssl": false,
+  "MACHINES": [
+    {
+      "NAME": "Edge",
+      "DATA_FOLDER": "sample_data/Edge/Data",
+      "REPORT_TEMPLATE_FILE_PATH": "sample_data/Edge/ReportTmplt/full/report1.tmpl.html",
+      "CASE_FOLDER_NAME_REGEX": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
+      "WL_pass_tolerance": 1.0,
+      "record_csv_file": "",
+      "MV_bb_search_method": "ConnectedComponent",
+      "kV_bb_search_method": "ConnectedComponent",
+      "MV_field_search_method": "Otsu",
+      "kV_field_search_method": "ImageCenter",
+      "crop_mm": 50.0,
+      "sad_mm": 1000.0,
+      "default_sid_mm": 1500.0,
+      "MV_kvp_min": 1000.0,
+      "MV_image_size": [1190, 1190],
+      "kV_image_size": [1024, 768],
+      "nominal_gantry_angles": [270, 0, 90, 180],
+      "nominal_table_angles": [90, 45, 0, 315, 270],
+      "nominal_collimator_angles": [135, 90, 45, 0, 315, 270, 225],
+      "DICOM_PLAN_FILE": "sample_data/Edge/Plan/RP.EdgeDryRun.WL.dcm",
+      "IGNORE_BEAMS": [2],
+      "ALL_RI_IMAGE_REQUIRED": false
+    }
+  ]
+}

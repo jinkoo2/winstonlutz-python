@@ -3,22 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
-
 from pathlib import Path
 
 from .analysis import analyze_image
+from .logutil import configure_logging
 from .pipeline import run_case
 from .validate import validate_sample_data
 from .watcher import watch
-
-
-def _setup_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     p_plan.add_argument("rtplan", nargs="?", help="RP.*.dcm (default: Edge sample Plan)")
 
     args = parser.parse_args(argv)
-    _setup_logging(args.verbose)
+    configure_logging(verbose=args.verbose, console=True)
 
     if args.cmd == "analyze-image":
         result = analyze_image(

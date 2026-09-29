@@ -10,9 +10,11 @@ import sys
 import threading
 import traceback
 from email.mime.application import MIMEApplication
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import os
+import re
 from pathlib import Path
 
 from .config import Param
@@ -23,14 +25,36 @@ PASSPHRASE = os.environ.get("WINSTONLUTZ_EMAIL_PASSPHRASE", "")
 _sending_error_email = False
 
 
-def recipient_addresses(to: str, domain: str = "") -> list[str]:
-    """Split a comma list into addresses. Local parts get ``@domain``."""
+def error_email_to_list(value) -> list[str]:
+    """Normalize ``error_email_to`` (string, comma list, or JSON array) to addresses."""
+    chunks: list[str] = []
+    if isinstance(value, (list, tuple)):
+        chunks.extend(str(item or "") for item in value)
+    elif value is not None:
+        chunks.append(str(value))
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        for line in chunk.replace(";", "\n").splitlines():
+            for part in line.split(","):
+                name = part.strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                out.append(name)
+    return out
+
+
+def format_error_email_to(value) -> str:
+    """One address per line for the Settings editor."""
+    return "\n".join(error_email_to_list(value))
+
+
+def recipient_addresses(to: str | list | None, domain: str = "") -> list[str]:
+    """Resolve ``error_email_to`` entries. Local parts get ``@domain``."""
     domain = str(domain or "").strip().lstrip("@")
     out: list[str] = []
-    for part in str(to or "").split(","):
-        name = part.strip()
-        if not name:
-            continue
+    for name in error_email_to_list(to):
         if "@" in name:
             out.append(name)
         elif domain:
@@ -71,7 +95,7 @@ def decrypt_password(cipher_text: str, pass_phrase: str = PASSPHRASE) -> str:
 def send(
     from_user: str,
     from_enc_pw: str,
-    to: str,
+    to: str | list | None,
     subject: str,
     body: str,
     domain: str,
@@ -79,26 +103,45 @@ def send(
     port: int,
     enable_ssl: bool,
     attachments: list[str] | None = None,
+    inline_images: list[tuple[str, Path]] | None = None,
 ) -> None:
-    if not from_user or not to or not host:
+    if not from_user or not host:
         logger.info("email skipped: missing from/to/host")
         return
 
-    msg = MIMEMultipart()
-    from_addr = from_user if "@" in from_user else f"{from_user}@{domain}"
-    msg["From"] = from_addr
     addresses = recipient_addresses(to, domain)
     if not addresses:
         logger.info("email skipped: no recipients")
         return
+
+    from_addr = from_user if "@" in from_user else f"{from_user}@{domain}"
+    related = MIMEMultipart("related")
+    related.attach(MIMEText(body, "html"))
+    for cid, image_path in inline_images or []:
+        path = Path(image_path)
+        if not path.is_file():
+            continue
+        subtype = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".gif": "gif"}.get(
+            path.suffix.lower(), "png"
+        )
+        part = MIMEImage(path.read_bytes(), _subtype=subtype)
+        part.add_header("Content-ID", f"<{cid}>")
+        part.add_header("Content-Disposition", "inline", filename=path.name)
+        related.attach(part)
+
+    extra = [Path(p) for p in (attachments or []) if Path(p).is_file()]
+    if extra:
+        msg = MIMEMultipart("mixed")
+        msg.attach(related)
+        for path in extra:
+            part = MIMEApplication(path.read_bytes(), Name=path.name)
+            part["Content-Disposition"] = f'attachment; filename="{path.name}"'
+            msg.attach(part)
+    else:
+        msg = related
+    msg["From"] = from_addr
     msg["To"] = ", ".join(addresses)
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "html"))
-    for path in attachments or []:
-        data = Path(path).read_bytes()
-        part = MIMEApplication(data, Name=Path(path).name)
-        part["Content-Disposition"] = f'attachment; filename="{Path(path).name}"'
-        msg.attach(part)
 
     smtp = smtplib.SMTP(host, port, timeout=30)
     try:
@@ -109,6 +152,43 @@ def send(
         smtp.sendmail(from_addr, addresses, msg.as_string())
     finally:
         smtp.quit()
+
+
+def resolve_report_image(case_dir: Path, src: str) -> Path | None:
+    text = str(src or "").strip()
+    if not text or text.lower().startswith("cid:") or "://" in text:
+        return None
+    text = text.replace("\\", "/")
+    path = Path(text)
+    if path.is_absolute() and path.is_file():
+        return path
+    candidate = (Path(case_dir) / text).resolve()
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def html_with_cid_images(html: str, case_dir: str | Path) -> tuple[str, list[tuple[str, Path]]]:
+    """Rewrite local <img src> to cid: and return (html, [(cid, path), ...])."""
+    case_dir = Path(case_dir)
+    images: list[tuple[str, Path]] = []
+    by_path: dict[str, str] = {}
+    pattern = re.compile(r'(<img\b[^>]*\bsrc=["\'])([^"\']+)(["\'])', re.IGNORECASE)
+
+    def repl(match: re.Match) -> str:
+        src = match.group(2)
+        path = resolve_report_image(case_dir, src)
+        if path is None:
+            return match.group(0)
+        key = str(path)
+        cid = by_path.get(key)
+        if cid is None:
+            cid = f"wl{len(by_path)}"
+            by_path[key] = cid
+            images.append((cid, path))
+        return f"{match.group(1)}cid:{cid}{match.group(3)}"
+
+    return pattern.sub(repl, html), images
 
 
 def send_from_config(param: Param, subject: str, body: str, to_key: str = "email_to") -> None:
@@ -125,14 +205,12 @@ def send_from_config(param: Param, subject: str, body: str, to_key: str = "email
     )
 
 
-def error_email_settings(data: dict | None = None) -> dict | None:
-    """Return SMTP fields if ``error_email_to`` is set; otherwise None."""
-    from .app_settings import ERROR_EMAIL_TO_KEY, load_gui_settings
+def smtp_settings(data: dict | None = None) -> dict | None:
+    """SMTP from/host for outgoing mail. Does not require error_email_to."""
+    from .app_settings import email_settings_block, load_gui_settings
 
-    settings = data if data is not None else load_gui_settings()
-    to = str((settings or {}).get(ERROR_EMAIL_TO_KEY) or "").strip()
-    if not to:
-        return None
+    raw = data if data is not None else load_gui_settings()
+    settings = email_settings_block(raw)
     host = str(settings.get("email_host_address") or "").strip()
     from_user = str(settings.get("email_from") or "").strip()
     if not host or not from_user:
@@ -146,7 +224,6 @@ def error_email_settings(data: dict | None = None) -> dict | None:
     if isinstance(ssl, str):
         ssl = ssl.strip().lower() in ("true", "1", "yes")
     return {
-        "to": to,
         "from_user": from_user,
         "from_enc_pw": str(settings.get("email_from_enc_pw") or ""),
         "domain": str(settings.get("email_domain") or ""),
@@ -154,6 +231,60 @@ def error_email_settings(data: dict | None = None) -> dict | None:
         "port": port_n,
         "enable_ssl": bool(ssl),
     }
+
+
+def merge_address_lists(*values) -> list[str]:
+    """Deduped addresses from one or more ``error_email_to``-style lists."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for name in error_email_to_list(value):
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def smtp_list_settings(to_key: str, data: dict | None = None) -> dict | None:
+    """Return SMTP fields plus ``to`` if *to_key* has addresses; otherwise None."""
+    from .app_settings import email_settings_block, load_gui_settings
+
+    raw = data if data is not None else load_gui_settings()
+    smtp = smtp_settings(raw)
+    if smtp is None:
+        return None
+    settings = email_settings_block(raw)
+    to = error_email_to_list((settings or {}).get(to_key))
+    if not to:
+        return None
+    return {**smtp, "to": to}
+
+
+def error_email_settings(data: dict | None = None) -> dict | None:
+    """Return SMTP fields if ``error_email_to`` is set; otherwise None."""
+    from .app_settings import ERROR_EMAIL_TO_KEY
+
+    return smtp_list_settings(ERROR_EMAIL_TO_KEY, data)
+
+
+def event_email_settings(data: dict | None = None) -> dict | None:
+    """Return SMTP fields if ``event_email_to`` is set; otherwise None."""
+    from .app_settings import EVENT_EMAIL_TO_KEY
+
+    return smtp_list_settings(EVENT_EMAIL_TO_KEY, data)
+
+
+def igrt_report_recipients(machine_cfg: dict | None = None, data: dict | None = None) -> list[str]:
+    """System-wide ``Notifications.email.new_case_email_to``, plus optional per-machine extras."""
+    from .app_settings import NEW_CASE_EMAIL_TO_KEY, email_settings_block, load_gui_settings
+
+    raw = data if data is not None else load_gui_settings()
+    settings = email_settings_block(raw)
+    return merge_address_lists(
+        (settings or {}).get(NEW_CASE_EMAIL_TO_KEY),
+        (machine_cfg or {}).get(NEW_CASE_EMAIL_TO_KEY),
+    )
 
 
 def _error_email_body(message: str, context: str, details: str) -> str:
@@ -175,6 +306,137 @@ def _error_email_body(message: str, context: str, details: str) -> str:
     )
 
 
+def _post_webhook(url: str, payload: dict) -> None:
+    import json
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()[:300]
+        except Exception:
+            pass
+        extra = f": {detail}" if detail else ""
+        raise RuntimeError(f"HTTP {exc.code} {exc.reason}{extra}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"webhook failed: {exc.reason}") from exc
+
+
+def _error_plain_text(message: str, context: str, details: str) -> str:
+    from . import __version__
+
+    return (
+        f"Winston-Lutz {__version__} error\n"
+        f"host={platform.node()}\n"
+        f"argv={' '.join(sys.argv)}\n"
+        f"context={context or ''}\n"
+        f"error={message or ''}\n\n"
+        f"{details or ''}"
+    )
+
+
+def post_chat_webhooks(
+    message: str,
+    details: str = "",
+    *,
+    context: str = "",
+    data: dict | None = None,
+) -> None:
+    from .app_settings import chat_webhook_urls
+
+    text = _error_plain_text(message, context, details)
+    hooks = chat_webhook_urls(data)
+    for name in ("google_chat", "slack", "microsoft_teams", "discord"):
+        url = hooks.get(name) or ""
+        if url:
+            try:
+                _post_webhook(url, _chat_payload(name, text))
+            except Exception:
+                logger.warning("chat webhook %s failed", name)
+
+
+CHAT_CHANNEL_LABELS = {
+    "google_chat": "Google Chat",
+    "slack": "Slack",
+    "microsoft_teams": "Microsoft Teams",
+    "discord": "Discord",
+}
+
+
+def _chat_payload(channel: str, text: str) -> dict:
+    if channel == "discord":
+        clipped = text if len(text) <= 1900 else text[:1900] + "\n…"
+        return {"content": clipped}
+    clipped = text if len(text) <= 3500 else text[:3500] + "\n…"
+    return {"text": clipped}
+
+
+def _test_plain_text(channel_label: str) -> str:
+    from . import __version__
+
+    return (
+        f"Winston-Lutz {__version__} notification test\n"
+        f"host={platform.node()}\n"
+        f"channel={channel_label}\n"
+        "This is a configuration test from Settings → Notifications."
+    )
+
+
+def send_test_email(data: dict | None = None) -> None:
+    """Send a test email using ``data`` (unsaved dialog values). Raises on failure."""
+    cfg = error_email_settings(data)
+    if cfg is None:
+        raise RuntimeError(
+            "Fill error_email_to, email_from, and email_host_address first."
+        )
+    if not recipient_addresses(cfg["to"], cfg["domain"]):
+        raise RuntimeError(
+            "error_email_to has no valid address (use full emails or set email_domain)."
+        )
+    try:
+        send(
+            from_user=cfg["from_user"],
+            from_enc_pw=cfg["from_enc_pw"],
+            to=cfg["to"],
+            subject="Winston-Lutz notification test",
+            body=_error_email_body(
+                "Notification test",
+                "settings-test",
+                _test_plain_text("Email"),
+            ),
+            domain=cfg["domain"],
+            host=cfg["host"],
+            port=cfg["port"],
+            enable_ssl=cfg["enable_ssl"],
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"SMTP failed: {exc}") from exc
+
+
+def send_test_chat(channel: str, data: dict | None = None) -> None:
+    """Post a test message to one chat webhook. Raises on failure."""
+    from .app_settings import chat_webhook_urls
+
+    label = CHAT_CHANNEL_LABELS.get(channel, channel)
+    url = (chat_webhook_urls(data).get(channel) or "").strip()
+    if not url:
+        raise RuntimeError(f"Enter a {label} webhook_url first.")
+    _post_webhook(url, _chat_payload(channel, _test_plain_text(label)))
+
+
 def send_error_email(
     message: str,
     details: str = "",
@@ -182,23 +444,67 @@ def send_error_email(
     context: str = "",
     blocking: bool = False,
 ) -> None:
-    """Email an exception if ``error_email_to`` is set. Failures are ignored."""
+    """Email and/or post chat webhooks if those channels are set. Failures are ignored."""
     global _sending_error_email
     if _sending_error_email:
         return
+    from .app_settings import chat_webhook_urls
+
     cfg = error_email_settings()
-    if cfg is None:
+    hooks = chat_webhook_urls()
+    if cfg is None and not any(hooks.values()):
         return
 
     def _run() -> None:
         global _sending_error_email
         _sending_error_email = True
         try:
+            if cfg is not None:
+                send(
+                    from_user=cfg["from_user"],
+                    from_enc_pw=cfg["from_enc_pw"],
+                    to=cfg["to"],
+                    subject=f"Winston-Lutz error: {message[:120] or context or 'exception'}",
+                    body=_error_email_body(message, context, details),
+                    domain=cfg["domain"],
+                    host=cfg["host"],
+                    port=cfg["port"],
+                    enable_ssl=cfg["enable_ssl"],
+                )
+            post_chat_webhooks(message, details, context=context)
+        except Exception:
+            logger.warning("error notification failed", exc_info=True)
+        finally:
+            _sending_error_email = False
+
+    if blocking:
+        _run()
+        return
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        return
+
+
+def send_event_email(
+    message: str,
+    details: str = "",
+    *,
+    context: str = "event",
+    blocking: bool = True,
+) -> None:
+    """Email ``event_email_to`` for service start/stop and other system events."""
+    cfg = event_email_settings()
+    if cfg is None:
+        return
+
+    def _run() -> None:
+        try:
             send(
                 from_user=cfg["from_user"],
                 from_enc_pw=cfg["from_enc_pw"],
                 to=cfg["to"],
-                subject=f"Winston-Lutz error: {message[:120] or context or 'exception'}",
+                subject=f"Winston-Lutz event: {message[:120] or context}",
                 body=_error_email_body(message, context, details),
                 domain=cfg["domain"],
                 host=cfg["host"],
@@ -206,9 +512,7 @@ def send_error_email(
                 enable_ssl=cfg["enable_ssl"],
             )
         except Exception:
-            logger.warning("error email failed", exc_info=True)
-        finally:
-            _sending_error_email = False
+            logger.warning("event notification failed", exc_info=True)
 
     if blocking:
         _run()

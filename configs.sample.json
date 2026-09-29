@@ -1,8 +1,18 @@
 {
-  "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
-  "email_from": "radonc.physics",
-  "email_domain": "stonybrookmedicine.edu",
-  "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
-  "email_host_port": 25,
-  "enable_ssl": false
+  "Notifications": {
+    "email": {
+      "error_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "event_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "email_from": "radonc.physics",
+      "email_domain": "stonybrookmedicine.edu",
+      "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+      "email_host_port": 25,
+      "enable_ssl": false
+    },
+    "google_chat": { "webhook_url": "" },
+    "slack": { "webhook_url": "" },
+    "microsoft_teams": { "webhook_url": "" },
+    "discord": { "webhook_url": "" }
+  }
 }

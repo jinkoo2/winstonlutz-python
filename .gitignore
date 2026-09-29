@@ -12,3 +12,4 @@ venv/
 /configs.json
 /winstonlutz.gui.settings.json
 /_logs/
+/_users/

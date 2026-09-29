@@ -1,12 +1,55 @@
 {
   "Institution": "Your Institution",
   "RunMode": "Clinic",
-  "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
-  "email_from": "radonc.physics",
-  "email_domain": "stonybrookmedicine.edu",
-  "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
-  "email_host_port": 25,
-  "enable_ssl": false,
+  "Identity": {
+    "user_id_method": "None",
+    "oidc": {
+      "issuer": "https://login.apps.myphysics.net/realms/myphysics",
+      "client_id": "winstonlutz",
+      "scopes": "openid profile email",
+      "redirect_uri": "http://127.0.0.1:17843/callback",
+      "registration_url": "https://login.apps.myphysics.net/realms/myphysics/account/"
+    }
+  },
+  "Watcher": {
+    "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT",
+    "data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
+    "recursive": true,
+    "file_patterns": ["RE.*.dcm"],
+    "case_folder_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
+    "case_dir_levels": 1,
+    "poll_sec": 10
+  },
+  "Notifications": {
+    "email": {
+      "error_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "event_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "email_from": "radonc.physics",
+      "email_domain": "stonybrookmedicine.edu",
+      "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+      "email_host_port": 25,
+      "enable_ssl": false,
+      "email_from_enc_pw": ""
+    },
+    "google_chat": { "webhook_url": "" },
+    "slack": { "webhook_url": "" },
+    "microsoft_teams": { "webhook_url": "" },
+    "discord": { "webhook_url": "" }
+  },
+  "PostProcessing": [
+    {
+      "type": "docuforms2_igrt",
+      "enabled": true,
+      "backend_url": "https://roweb3.uhmc.sbuh.stonybrook.edu:9001",
+      "verify_ssl": false,
+      "dry_run": false,
+      "attach_dcm_zip": true,
+      "attach_pdf": false,
+      "resubmit": false,
+      "timeout_sec": 300
+    }
+  ],
   "MACHINES": [
     {
       "NAME": "Edge",
@@ -14,6 +57,7 @@
       "REPORT_TEMPLATE_FILE_PATH": "sample_data/Edge/ReportTmplt/full/report1.tmpl.html",
       "CASE_FOLDER_NAME_REGEX": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
       "WL_pass_tolerance": 1.0,
+      "docuforms2_form_id": "sb_edge_mlc_wl",
       "record_csv_file": "",
       "MV_bb_search_method": "ConnectedComponent",
       "kV_bb_search_method": "ConnectedComponent",

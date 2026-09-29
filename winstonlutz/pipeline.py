@@ -20,9 +20,14 @@ from .analysis import (
     parse_result_txt,
     use_field_mask,
 )
-from .app_settings import DEFAULT_CASE_FOLDER_REGEX, find_machine_for_folder, report_template_root
-from .config import Param, find_machine_config
-from .emailer import send_from_config
+from .app_settings import (
+    DEFAULT_CASE_FOLDER_REGEX,
+    find_machine_by_name,
+    find_machine_for_folder,
+    report_template_root,
+    simple_machine_name,
+)
+from .emailer import html_with_cid_images, igrt_report_recipients, send, smtp_settings
 from .models import WinstonLutzItem, calc_norm, save_items_json
 from .rtplan import (
     find_machine_rtplan,
@@ -289,21 +294,16 @@ def run_case(
     preprocess: bool = False,
 ) -> list[WinstonLutzItem]:
     case_dir = Path(case_dir)
-    machine_cfg = find_machine_for_folder(case_dir)
+    machine = str(machine or "").strip() or simple_machine_name(case_dir)
+    machine_cfg = find_machine_by_name(machine) or find_machine_for_folder(case_dir)
+    if machine_cfg and not machine:
+        machine = str(machine_cfg.get("NAME") or "").strip()
     validate_case_dir_name(
         case_dir,
         str(machine_cfg.get("CASE_FOLDER_NAME_REGEX") or "") if machine_cfg else None,
     )
-
-    config_path = find_machine_config(case_dir)
-    param = Param(config_path) if config_path else None
-    if machine is None:
-        if param:
-            machine = param.get_value("machine")
-        if not machine:
-            machine = case_dir.parent.name
-            if machine.lower() == "data":
-                machine = case_dir.parent.parent.name
+    if not machine:
+        raise ValueError(f"could not determine machine name from parent of {case_dir}")
 
     if data_root is None:
         if case_dir.parent.name.lower() == "data":
@@ -315,10 +315,6 @@ def run_case(
 
     mv_method = str((machine_cfg or {}).get("MV_bb_search_method") or "")
     kv_method = str((machine_cfg or {}).get("kV_bb_search_method") or "")
-    if not mv_method:
-        mv_method = param.get_value("MV_bb_search_method") if param else ""
-    if not kv_method:
-        kv_method = param.get_value("kV_bb_search_method") if param else ""
     if not mv_method:
         mv_method = "LoG" if machine.lower() == "truebeam" else "ConnectedComponent"
     if not kv_method:
@@ -347,8 +343,6 @@ def run_case(
     save_items_json(items, json_dir / f"{case_dir.name}.json")
 
     csv_file = str((machine_cfg or {}).get("record_csv_file") or "")
-    if not csv_file and param:
-        csv_file = param.get_value("record_csv_file")
     if csv_file:
         max_item = max(items, key=lambda i: i.calc_norm_of_bb_offset_from_field_center())
         date = case_dir.name.split("_")[0].replace("-", "/")
@@ -373,8 +367,6 @@ def run_case(
     tol = 1.0
     if machine_cfg and machine_cfg.get("WL_pass_tolerance") not in (None, ""):
         tol = float(machine_cfg["WL_pass_tolerance"])
-    elif param:
-        tol = param.get_float("WL_pass_tolerance", 1.0) or 1.0
     if tmpl_root.is_dir():
         n_fail = sum(
             1 for i in items if i.calc_norm_of_bb_offset_from_field_center() > tol
@@ -389,10 +381,41 @@ def run_case(
             and not case_has_missing_required_ri(case_dir, machine_cfg),
         )
 
-    if send_email and param is not None:
-        short = case_dir / "report.short.html"
-        if short.is_file():
-            send_from_config(param, f"IGRT ({machine})", short.read_text(encoding="utf-8"))
+    if send_email:
+        report = case_dir / "report.html"
+        smtp = smtp_settings()
+        to = igrt_report_recipients(machine_cfg)
+        if report.is_file() and smtp is not None and to:
+            try:
+                html, images = html_with_cid_images(
+                    report.read_text(encoding="utf-8"), case_dir
+                )
+                send(
+                    from_user=smtp["from_user"],
+                    from_enc_pw=smtp["from_enc_pw"],
+                    to=to,
+                    subject=f"IGRT ({machine})",
+                    body=html,
+                    domain=smtp["domain"],
+                    host=smtp["host"],
+                    port=smtp["port"],
+                    enable_ssl=smtp["enable_ssl"],
+                    inline_images=images,
+                )
+            except Exception:
+                logger.warning("IGRT report email failed for %s", case_dir, exc_info=True)
+        else:
+            logger.info(
+                "IGRT report email skipped: need report.html, SMTP, and "
+                "Notifications.email.new_case_email_to"
+            )
+
+    try:
+        from .postprocess import run_post_processing
+
+        run_post_processing(case_dir, machine_cfg, items)
+    except Exception:
+        logger.exception("post-processing failed for %s", case_dir)
 
     return items
 
@@ -430,7 +453,9 @@ def list_case_candidates(machine: dict) -> list[Path]:
     try:
         with os.scandir(data) as it:
             for entry in it:
-                if entry.is_dir(follow_symlinks=False) and re.fullmatch(pattern, entry.name):
+                if not re.fullmatch(pattern, entry.name):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
                     found.append(Path(entry.path))
     except OSError:
         return []
@@ -465,6 +490,47 @@ def case_has_results(folder: str | Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def case_has_html_report(folder: str | Path) -> bool:
+    """True when the case already has a written HTML report."""
+    folder = Path(folder)
+    try:
+        return (folder / "report.html").is_file() or (folder / "report.short.html").is_file()
+    except OSError:
+        return False
+
+
+_REPORT_RESULT_RE = re.compile(
+    r"Result</span>\s*<input[^>]*\bvalue=\"([^\"]*)\"",
+    re.IGNORECASE,
+)
+
+
+def case_open_status(folder: str | Path) -> str:
+    """Fast Open Case status from report.html: 'new', 'pass', or 'fail'.
+
+    Does not list RI files or parse result.txt (those are expensive on network shares).
+    """
+    folder = Path(folder)
+    for name in ("report.html", "report.short.html"):
+        path = folder / name
+        try:
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read(16000)
+        except OSError:
+            continue
+        match = _REPORT_RESULT_RE.search(text)
+        if match:
+            value = match.group(1).strip().upper()
+            if value == "FAIL":
+                return "fail"
+            if value == "PASS":
+                return "pass"
+        return "pass"
+    return "new"
 
 
 def list_case_folders(machine: dict) -> list[Path]:
@@ -520,7 +586,7 @@ def infer_folder_bb_methods(
     folder: str | Path,
     items: list[WinstonLutzItem] | None = None,
 ) -> tuple[str, str]:
-    """Return (mv_method, kv_method) from result.txt, then MACHINES JSON, then config.txt, then log.txt."""
+    """Return (mv_method, kv_method) from result.txt, then MACHINES JSON, then log.txt."""
     folder = Path(folder)
     if items is None:
         items = load_existing_results(folder)
@@ -538,23 +604,16 @@ def infer_folder_bb_methods(
                 kv = method
 
     if not mv or not kv:
-        machine_cfg = find_machine_for_folder(folder)
+        machine_cfg = find_machine_for_folder(folder) or find_machine_by_name(
+            simple_machine_name(folder)
+        )
         if machine_cfg:
             if not mv:
                 mv = normalize_bb_method(str(machine_cfg.get("MV_bb_search_method") or ""))
             if not kv:
                 kv = normalize_bb_method(str(machine_cfg.get("kV_bb_search_method") or ""))
 
-    if not mv or not kv:
-        config_path = find_machine_config(folder)
-        if config_path:
-            param = Param(config_path)
-            if not mv:
-                mv = normalize_bb_method(param.get_value("MV_bb_search_method"))
-            if not kv:
-                kv = normalize_bb_method(param.get_value("kV_bb_search_method"))
-
-    # New cases have no result.txt: stop at config.txt (do not parse leftover logs).
+    # New cases have no result.txt: use MACHINES JSON, then leftover logs.
     if items and (not mv or not kv):
         for dcm in list_ri_files(folder):
             log_file = Path(str(dcm) + "_out") / "log.txt"

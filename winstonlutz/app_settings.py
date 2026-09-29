@@ -1,8 +1,7 @@
 """GUI settings in winstonlutz.gui.settings.json next to the executable.
 
 Machine list, data folders, BB methods, and tolerance live under MACHINES.
-Clinic email/tools stay in each machine tree's app.config.txt.
-Window/level and view style stay in QSettings.
+Clinic SMTP lives under Notifications.email. Window/level and view style stay in QSettings.
 """
 
 from __future__ import annotations
@@ -20,7 +19,28 @@ RUN_MODE_CLINIC = "Clinic"
 RUN_MODE_SIMPLE = "Simple"
 RUN_MODES = (RUN_MODE_CLINIC, RUN_MODE_SIMPLE)
 ERROR_EMAIL_TO_KEY = "error_email_to"
+EVENT_EMAIL_TO_KEY = "event_email_to"
+NEW_CASE_EMAIL_TO_KEY = "new_case_email_to"
+NOTIFICATIONS_KEY = "Notifications"
+WATCHER_KEY = "Watcher"
+POST_PROCESSING_KEY = "PostProcessing"
+DOCUFORMS2_IGRT_TYPE = "docuforms2_igrt"
+TOP_LEVEL_EMAIL_KEYS = (
+    ERROR_EMAIL_TO_KEY,
+    EVENT_EMAIL_TO_KEY,
+    NEW_CASE_EMAIL_TO_KEY,
+    "email_from",
+    "email_domain",
+    "email_host_address",
+    "email_host_port",
+    "enable_ssl",
+    "email_from_enc_pw",
+)
 DEFAULT_CASE_FOLDER_REGEX = r"^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$"
+DEFAULT_WATCH_FILE_PATTERNS = ["RE.*.dcm"]
+DEFAULT_WATCH_RECURSIVE = True
+DEFAULT_WATCH_CASE_DIR_LEVELS = 1
+DEFAULT_WATCH_POLL_SEC = 10.0
 
 
 def app_dir() -> Path:
@@ -91,6 +111,167 @@ def named_machines(machines) -> list[dict]:
     return [m for m in machines if isinstance(m, dict) and str(m.get("NAME") or "").strip()]
 
 
+def notifications_block(data: dict | None) -> dict:
+    notes = (data or {}).get(NOTIFICATIONS_KEY)
+    return notes if isinstance(notes, dict) else {}
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
+def normalize_file_patterns(value) -> list[str]:
+    """Watcher globs: JSON array, comma/newline string, or default ``RE.*.dcm``."""
+    chunks: list[str] = []
+    if isinstance(value, (list, tuple)):
+        chunks.extend(str(item or "") for item in value)
+    elif value is not None and str(value).strip():
+        chunks.append(str(value))
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        for line in chunk.replace(";", "\n").splitlines():
+            for part in line.split(","):
+                pat = part.strip()
+                if not pat or pat in seen:
+                    continue
+                seen.add(pat)
+                out.append(pat)
+    return out or list(DEFAULT_WATCH_FILE_PATTERNS)
+
+
+def watcher_settings(data: dict | None = None) -> dict:
+    """Paths and match rules for ``winstonlutz watch``."""
+    settings = data if data is not None else load_gui_settings()
+    block = (settings or {}).get(WATCHER_KEY)
+    raw = block if isinstance(block, dict) else {}
+    if "case_folder_regex" in raw:
+        case_regex = str(raw.get("case_folder_regex") or "")
+    else:
+        case_regex = DEFAULT_CASE_FOLDER_REGEX
+    try:
+        levels = int(raw.get("case_dir_levels", DEFAULT_WATCH_CASE_DIR_LEVELS))
+    except (TypeError, ValueError):
+        levels = DEFAULT_WATCH_CASE_DIR_LEVELS
+    levels = max(1, min(levels, 8))
+    try:
+        poll = float(raw.get("poll_sec", DEFAULT_WATCH_POLL_SEC))
+    except (TypeError, ValueError):
+        poll = DEFAULT_WATCH_POLL_SEC
+    if poll <= 0:
+        poll = DEFAULT_WATCH_POLL_SEC
+    return {
+        "watch_path": str(raw.get("watch_path") or "").strip(),
+        "data_root": str(raw.get("data_root") or "").strip(),
+        "recursive": _as_bool(raw.get("recursive"), DEFAULT_WATCH_RECURSIVE),
+        "file_patterns": normalize_file_patterns(
+            raw.get("file_patterns", raw.get("file_pattern"))
+        ),
+        "case_folder_regex": case_regex,
+        "case_dir_levels": levels,
+        "poll_sec": poll,
+    }
+
+
+def default_docuforms2_igrt_step() -> dict:
+    """Clinic DocuForms2 upload (upload_igrt input.json)."""
+    return {
+        "type": DOCUFORMS2_IGRT_TYPE,
+        "enabled": True,
+        "backend_url": "https://roweb3.uhmc.sbuh.stonybrook.edu:9001",
+        "verify_ssl": False,
+        "dry_run": False,
+        "attach_dcm_zip": True,
+        "attach_pdf": False,
+        "resubmit": False,
+        "timeout_sec": 300,
+    }
+
+
+def post_processing_steps(data: dict | None = None) -> list[dict]:
+    settings = data if data is not None else load_gui_settings()
+    raw = (settings or {}).get(POST_PROCESSING_KEY)
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [step for step in raw if isinstance(step, dict) and str(step.get("type") or "").strip()]
+
+
+def find_post_step(type_name: str, data: dict | None = None) -> dict:
+    wanted = str(type_name or "").strip()
+    for step in post_processing_steps(data):
+        if str(step.get("type") or "").strip() == wanted:
+            return dict(step)
+    return {}
+
+
+def upsert_post_step(steps: list, step: dict) -> list[dict]:
+    kind = str((step or {}).get("type") or "").strip()
+    out: list[dict] = []
+    found = False
+    for existing in steps or []:
+        if not isinstance(existing, dict):
+            continue
+        if str(existing.get("type") or "").strip() == kind:
+            out.append(dict(step))
+            found = True
+        else:
+            out.append(dict(existing))
+    if not found and kind:
+        out.append(dict(step))
+    return out
+
+
+def email_settings_block(data: dict | None) -> dict:
+    """Email fields from Notifications.email, else top-level keys."""
+    notes = notifications_block(data)
+    nested = notes.get("email")
+    if isinstance(nested, dict) and any(_setting_nonempty(v) for v in nested.values()):
+        merged = dict(data or {})
+        merged.update(nested)
+        return merged
+    return dict(data or {})
+
+
+def _setting_nonempty(value) -> bool:
+    if isinstance(value, (list, tuple)):
+        return any(str(x or "").strip() for x in value)
+    return bool(str(value or "").strip())
+
+
+def chat_webhook_urls(data: dict | None = None) -> dict[str, str]:
+    """Incoming webhook URLs; empty string means that channel is off."""
+    settings = data if data is not None else load_gui_settings()
+    notes = notifications_block(settings)
+    channels = (
+        ("google_chat", "google_chat_webhook_url"),
+        ("slack", "slack_webhook_url"),
+        ("microsoft_teams", "teams_webhook_url"),
+        ("discord", "discord_webhook_url"),
+    )
+    out: dict[str, str] = {}
+    for name, top_key in channels:
+        block = notes.get(name)
+        nested = ""
+        if isinstance(block, dict):
+            nested = str(block.get("webhook_url") or "").strip()
+        top = str((settings or {}).get(top_key) or "").strip()
+        out[name] = nested or top
+    return out
+
+
 def get_run_mode(data: dict | None = None) -> str:
     settings = data if data is not None else load_gui_settings()
     text = str((settings or {}).get(RUN_MODE_KEY) or "").strip()
@@ -117,10 +298,10 @@ def is_simple_run_mode(data: dict | None = None) -> bool:
 
 
 def simple_machine_name(case_folder: str | Path) -> str:
-    """Machine name for Simple mode: parent of the case folder.
+    """Machine name: parent of the case folder.
 
-    If that parent is named ``Data``, the grandparent is used
-    (``Edge/Data/26-09-24_...`` → ``Edge``).
+    ``Edge/26-09-24_...`` → ``Edge``. If that parent is named ``Data``,
+    the grandparent is used (``Edge/Data/26-09-24_...`` → ``Edge``).
     """
     folder = Path(case_folder)
     parent = folder.parent
@@ -139,13 +320,23 @@ def get_machines() -> list[dict]:
     return [m for m in machines if isinstance(m, dict)]
 
 
+def find_machine_by_name(name: str) -> dict | None:
+    want = str(name or "").strip().lower()
+    if not want:
+        return None
+    for machine in named_machines(get_machines()):
+        if str(machine.get("NAME") or "").strip().lower() == want:
+            return machine
+    return None
+
+
 def find_machine_for_folder(folder: str | Path) -> dict | None:
     """Match a case or machine folder to a MACHINES entry."""
     folder = Path(folder)
     try:
         folder = folder.resolve()
     except OSError:
-        return None
+        pass
     for machine in get_machines():
         data = str(machine.get("DATA_FOLDER") or "").strip()
         if data:
@@ -167,7 +358,7 @@ def find_machine_for_folder(folder: str | Path) -> dict | None:
             if here.name == name:
                 return machine
             here = here.parent
-    return None
+    return find_machine_by_name(simple_machine_name(folder))
 
 
 BB_SEARCH_METHODS = ("ConnectedComponent", "LoG", "OtsuThreshold")
@@ -228,6 +419,8 @@ def default_machine(name: str = "New machine") -> dict:
         "CASE_FOLDER_NAME_REGEX": DEFAULT_CASE_FOLDER_REGEX,
         "WL_pass_tolerance": 1.0,
         "record_csv_file": "",
+        "new_case_email_to": [],
+        "docuforms2_form_id": "",
         "MV_bb_search_method": "ConnectedComponent",
         "kV_bb_search_method": "ConnectedComponent",
         "MV_field_search_method": "Otsu",

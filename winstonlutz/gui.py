@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QPushButton,
     QSlider,
     QSplitter,
     QHBoxLayout,
@@ -58,15 +59,24 @@ from .app_settings import (
     save_gui_settings,
     simple_machine_name,
 )
+from .identity import (
+    USER_ID_NONE,
+    USER_ID_OIDC,
+    clear_current_user,
+    current_user_email,
+    current_user_label,
+    current_user_profile,
+    get_user_id_method,
+    session_operator,
+    user_needs_email,
+)
 from .image_viewer import ImageViewer, sitk_to_array
 from .logutil import configure_logging
 from .models import WinstonLutzItem
 from .pipeline import (
     analyze_folder,
-    case_has_results,
-    case_has_ri,
-    case_recency_key,
-    case_result_status,
+    case_has_html_report,
+    case_open_status,
     find_html_report,
     infer_folder_bb_methods,
     list_case_candidates,
@@ -129,6 +139,9 @@ def window_title(case: str = "") -> str:
     institution = get_institution()
     if institution:
         parts.append(institution)
+    user = current_user_label()
+    if user:
+        parts.append(user)
     if case:
         parts.append(case)
     return " — ".join(parts)
@@ -181,60 +194,92 @@ def _type_rank(kind: str) -> int:
     return 2
 
 
-class CaseListModel(QAbstractListModel):
-    """Loads case folders in batches; status is computed only for rows that are fetched."""
+class ScanCasesWorker(QThread):
+    """List DATA_FOLDER case directories off the UI thread."""
 
-    PAGE = 40
-    MAX_SCAN = 120
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, machine: dict, parent=None):
+        super().__init__(parent)
+        self._machine = dict(machine)
+
+    def run(self):
+        try:
+            self.finished_ok.emit(list_case_candidates(self._machine))
+        except Exception as exc:
+            logger.exception("case scan failed")
+            self.failed.emit(str(exc))
+
+
+class CaseListModel(QAbstractListModel):
+    """Open Case list: 'all' is virtual; other filters load matching rows in batches.
+
+    Status comes from report.html, not a per-folder RI / result.txt scan.
+    """
+
+    PAGE = 50
+    MAX_SCAN = 80
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._candidates: list[Path] = []
         self._cursor = 0
         self._rows: list[tuple[Path, str]] = []
-        self._filter = "new"
-        self._tol = 1.0
+        self._filter = "all"
+        self._status_cache: dict[Path, str] = {}
         self._busy = False
+        self._virtual = True
 
-    def set_source(self, candidates: list[Path], tol_mm: float, status_filter: str) -> None:
+    def set_source(self, candidates: list[Path], _tol_mm: float, status_filter: str) -> None:
         self.beginResetModel()
         self._candidates = candidates
         self._cursor = 0
         self._rows = []
-        self._filter = status_filter or "new"
-        self._tol = tol_mm
+        self._filter = (status_filter or "all").strip().lower() or "all"
+        self._status_cache = {}
         self._busy = False
+        self._virtual = self._filter == "all"
         self.endResetModel()
-        self.fetchMore(QModelIndex())
+        if not self._virtual:
+            self.fetchMore(QModelIndex())
 
     def rowCount(self, parent=QModelIndex()) -> int:
         if parent.isValid():
             return 0
+        if self._virtual:
+            return len(self._candidates)
         return len(self._rows)
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+        folder = self._folder_at(index.row()) if index.isValid() else None
+        if folder is None:
             return None
-        folder, status = self._rows[index.row()]
+        status = self._status_at(index.row(), compute=not self._virtual)
         if role == Qt.DisplayRole:
-            return f"{folder.name}    {status}"
+            if status:
+                return f"{folder.name}    {status}"
+            return folder.name
         if role == Qt.ForegroundRole:
-            return QBrush(_STATUS_COLORS.get(status, QColor("#334155")))
+            return QBrush(_STATUS_COLORS.get(status or "new", QColor("#334155")))
         if role == Qt.FontRole:
             font = QFont()
-            font.setBold(status != "new")
+            font.setBold(bool(status) and status != "new")
             return font
         if role == Qt.UserRole:
             return str(folder)
         return None
 
     def case_at(self, row: int) -> Path | None:
-        if 0 <= row < len(self._rows):
-            return self._rows[row][0]
-        return None
+        return self._folder_at(row)
 
     def row_for_name(self, name: str) -> int:
         if not name:
+            return -1
+        if self._virtual:
+            for i, folder in enumerate(self._candidates):
+                if folder.name == name:
+                    return i
             return -1
         for i, (folder, _status) in enumerate(self._rows):
             if folder.name == name:
@@ -242,12 +287,12 @@ class CaseListModel(QAbstractListModel):
         return -1
 
     def canFetchMore(self, parent=QModelIndex()) -> bool:
-        if parent.isValid():
+        if parent.isValid() or self._virtual:
             return False
         return self._cursor < len(self._candidates)
 
     def fetchMore(self, parent=QModelIndex()) -> None:
-        if parent.isValid() or self._busy or not self.canFetchMore():
+        if parent.isValid() or self._virtual or self._busy or not self.canFetchMore():
             return
         self._busy = True
         added: list[tuple[Path, str]] = []
@@ -263,31 +308,60 @@ class CaseListModel(QAbstractListModel):
         finally:
             self._busy = False
         if added:
-            for folder, status in added:
-                self._insert_newest_first(folder, status)
+            start = len(self._rows)
+            self.beginInsertRows(QModelIndex(), start, start + len(added) - 1)
+            self._rows.extend(added)
+            self.endInsertRows()
         elif self.canFetchMore():
             QTimer.singleShot(0, lambda: self.fetchMore(QModelIndex()))
 
-    def _insert_newest_first(self, folder: Path, status: str) -> None:
-        key = case_recency_key(folder)
-        idx = len(self._rows)
-        for i, (existing, _status) in enumerate(self._rows):
-            if case_recency_key(existing) < key:
-                idx = i
-                break
-        self.beginInsertRows(QModelIndex(), idx, idx)
-        self._rows.insert(idx, (folder, status))
-        self.endInsertRows()
+    def ensure_status_range(self, start: int, end: int) -> None:
+        """Fill pass/fail for a visible slice without blocking the whole list."""
+        if not self._virtual or not self._candidates:
+            return
+        start = max(0, start)
+        end = min(len(self._candidates), max(start, end))
+        if start >= end:
+            return
+        changed = False
+        for i in range(start, end):
+            folder = self._candidates[i]
+            if folder in self._status_cache:
+                continue
+            self._status_cache[folder] = case_open_status(folder)
+            changed = True
+        if changed:
+            self.dataChanged.emit(self.index(start, 0), self.index(end - 1, 0))
+
+    def _folder_at(self, row: int) -> Path | None:
+        if self._virtual:
+            if 0 <= row < len(self._candidates):
+                return self._candidates[row]
+            return None
+        if 0 <= row < len(self._rows):
+            return self._rows[row][0]
+        return None
+
+    def _status_at(self, row: int, compute: bool = True) -> str:
+        if not self._virtual:
+            return self._rows[row][1]
+        folder = self._folder_at(row)
+        if folder is None:
+            return "new"
+        cached = self._status_cache.get(folder)
+        if cached is not None or not compute:
+            return cached or ""
+        status = case_open_status(folder)
+        self._status_cache[folder] = status
+        return status
 
     def _inspect(self, folder: Path) -> tuple[Path, str] | None:
-        if not case_has_ri(folder):
-            return None
         wanted = self._filter
         if wanted == "new":
-            if case_has_results(folder):
+            if case_has_html_report(folder):
                 return None
             return folder, "new"
-        status = case_result_status(folder, self._tol)
+        status = case_open_status(folder)
         if wanted in ("pass", "fail") and status != wanted:
             return None
         return folder, status
@@ -568,9 +642,8 @@ class OpenCaseDialog(QDialog):
             self.machine_combo.addItem(str(machine["NAME"]).strip(), machine)
 
         self.filter_combo = QComboBox()
-        for status in ("new", "fail", "pass", "all"):
+        for status in ("all", "new", "fail", "pass"):
             self.filter_combo.addItem(status, status)
-        self.filter_combo.setCurrentIndex(0)
 
         self.case_model = CaseListModel(self)
         self.case_view = QListView()
@@ -580,7 +653,8 @@ class OpenCaseDialog(QDialog):
         self.file_list = QListWidget()
         self.case_view.selectionModel().currentChanged.connect(self._on_case_changed)
         self.case_view.doubleClicked.connect(self._accept_if_case)
-        self.case_model.rowsInserted.connect(self._maybe_select_first)
+        self.case_model.rowsInserted.connect(self._on_cases_shown)
+        self.case_model.modelReset.connect(self._on_cases_shown)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept_if_case)
@@ -599,7 +673,9 @@ class OpenCaseDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Cases"))
-        filter_row.addStretch(1)
+        self._scan_status = QLabel("")
+        self._scan_status.setStyleSheet("color: #64748b;")
+        filter_row.addWidget(self._scan_status, 1)
         filter_row.addWidget(QLabel("Show"))
         filter_row.addWidget(self.filter_combo)
         left_layout.addLayout(filter_row)
@@ -625,15 +701,24 @@ class OpenCaseDialog(QDialog):
         if self._settings is None:
             self._settings = QSettings("MachineQA", "WinstonLutz")
         self._splitter_restored = False
+        self._scan_worker: ScanCasesWorker | None = None
+        self._scan_gen = 0
+        self._pending_tol = 1.0
+        self._pending_filter = "all"
         _restore_layout(self, self._settings, "open_case")
+
+        last_filter = str(self._settings.value("open_case/filter", "all") or "all")
+        filter_idx = self.filter_combo.findData(last_filter)
+        self.filter_combo.setCurrentIndex(filter_idx if filter_idx >= 0 else 0)
 
         if last_machine:
             idx = self.machine_combo.findText(last_machine)
             if idx >= 0:
                 self.machine_combo.setCurrentIndex(idx)
+        self.case_view.verticalScrollBar().valueChanged.connect(lambda *_: self._fill_visible_status())
         self._reload_cases(ask_folder=True)
         self.machine_combo.currentIndexChanged.connect(lambda *_: self._reload_cases(ask_folder=True))
-        self.filter_combo.currentIndexChanged.connect(lambda *_: self._reload_cases(ask_folder=False))
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -642,6 +727,8 @@ class OpenCaseDialog(QDialog):
             _restore_layout(self, self._settings, "open_case", self.splitter)
 
     def done(self, result):
+        self._scan_gen += 1
+        self._disconnect_scan_worker()
         _save_layout(self, self._settings, "open_case", self.splitter)
         super().done(result)
 
@@ -690,25 +777,96 @@ class OpenCaseDialog(QDialog):
         self._persist_data_folder(machine, chosen)
         return True
 
+    def _on_filter_changed(self, *_args):
+        self._settings.setValue("open_case/filter", str(self.filter_combo.currentData() or "all"))
+        self._reload_cases(ask_folder=False)
+
+    def _disconnect_scan_worker(self) -> None:
+        worker = self._scan_worker
+        self._scan_worker = None
+        if worker is None:
+            return
+        try:
+            worker.finished_ok.disconnect()
+            worker.failed.disconnect()
+        except TypeError:
+            pass
+
     def _reload_cases(self, ask_folder: bool = True):
         self.file_list.clear()
         self.selected_case = None
         self.ok_button.setEnabled(False)
+        status_filter = str(self.filter_combo.currentData() or "all")
         machine = self.machine_combo.currentData()
         if not machine:
-            self.case_model.set_source([], 1.0, "new")
+            self._scan_gen += 1
+            self._disconnect_scan_worker()
+            self.case_model.set_source([], 1.0, status_filter)
+            self._scan_status.setText("")
             return
         if ask_folder and not self._ensure_data_folder(machine):
-            self.case_model.set_source([], 1.0, str(self.filter_combo.currentData() or "new"))
+            self._scan_gen += 1
+            self._disconnect_scan_worker()
+            self.case_model.set_source([], 1.0, status_filter)
+            self._scan_status.setText("")
             return
         tol = 1.0
         if machine.get("WL_pass_tolerance") not in (None, ""):
             tol = float(machine["WL_pass_tolerance"])
-        self.case_model.set_source(
-            list_case_candidates(machine),
-            tol,
-            str(self.filter_combo.currentData() or "new"),
-        )
+        self._scan_gen += 1
+        gen = self._scan_gen
+        self._pending_tol = tol
+        self._pending_filter = status_filter
+        self._disconnect_scan_worker()
+        self.case_model.set_source([], tol, status_filter)
+        self._scan_status.setText("Scanning cases…")
+        worker = ScanCasesWorker(machine, self)
+        worker.finished_ok.connect(lambda folders, g=gen: self._on_cases_scanned(folders, g))
+        worker.failed.connect(lambda msg, g=gen: self._on_scan_failed(msg, g))
+        self._scan_worker = worker
+        worker.start()
+
+    def _on_cases_scanned(self, folders, gen: int) -> None:
+        if gen != self._scan_gen:
+            return
+        self._scan_worker = None
+        n = len(folders) if isinstance(folders, list) else 0
+        if self._pending_filter == "all":
+            self._scan_status.setText(f"{n} cases")
+        else:
+            self._scan_status.setText(f"Filtering {n} cases…")
+        self.case_model.set_source(folders if isinstance(folders, list) else [], self._pending_tol, self._pending_filter)
+        self._refresh_scan_status()
+        QTimer.singleShot(0, self._fill_visible_status)
+
+    def _on_scan_failed(self, message: str, gen: int) -> None:
+        if gen != self._scan_gen:
+            return
+        self._scan_worker = None
+        self._scan_status.setText("Scan failed")
+        logger.warning("Open Case scan failed: %s", message)
+
+    def _on_cases_shown(self, *_args):
+        self._refresh_scan_status()
+        QTimer.singleShot(0, self._maybe_select_first)
+
+    def _refresh_scan_status(self) -> None:
+        shown = self.case_model.rowCount()
+        if self._scan_worker is not None:
+            return
+        if self.case_model.canFetchMore():
+            self._scan_status.setText(f"Showing {shown}…")
+            return
+        self._scan_status.setText(f"{shown} cases")
+
+    def _fill_visible_status(self) -> None:
+        if self._pending_filter != "all" or self._scan_worker is not None:
+            return
+        first = self.case_view.indexAt(QPoint(4, 4))
+        start = first.row() if first.isValid() else 0
+        viewport = self.case_view.viewport().height() or 400
+        hint = max(24, self.case_view.sizeHintForRow(0) if self.case_model.rowCount() else 24)
+        self.case_model.ensure_status_range(start, start + max(40, viewport // max(1, hint) + 8))
 
     def _maybe_select_first(self):
         if self.case_view.currentIndex().isValid():
@@ -861,12 +1019,15 @@ class MainWindow(QMainWindow):
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
+        central_layout.addWidget(self._build_heading())
         central_layout.addWidget(self._build_toolbar())
         central_layout.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready")
         _restore_layout(self, self.settings, "main")
         self._apply_run_mode_ui()
+        self._refresh_heading()
+        QTimer.singleShot(0, self._after_shown)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -913,6 +1074,129 @@ class MainWindow(QMainWindow):
             layout.addWidget(widget, 0)
         layout.addStretch(1)
         return row
+
+    def _build_heading(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("appHeading")
+        bar.setStyleSheet(
+            """
+            QWidget#appHeading { background: #1f3a5f; }
+            QWidget#appHeading QLabel { color: #f8fafc; background: transparent; }
+            QWidget#appHeading QPushButton {
+                color: #f8fafc;
+                background: #34547a;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QWidget#appHeading QPushButton:hover { background: #456894; }
+            QWidget#appHeading QPushButton:disabled { color: #94a3b8; background: #2a4a6e; }
+            """
+        )
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(10)
+        icon = QLabel()
+        icon.setPixmap(app_icon().pixmap(28, 28))
+        title = QLabel("Winston-Lutz")
+        title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.heading_institution = QLabel()
+        self.heading_institution.setStyleSheet("color: #cbd5e1;")
+        self.heading_user = QLabel()
+        self.heading_user.setStyleSheet("font-weight: 600;")
+        self.user_settings_btn = QPushButton("User settings")
+        self.login_btn = QPushButton("Login")
+        self.logout_btn = QPushButton("Logout")
+        self.user_settings_btn.clicked.connect(lambda: self.open_user_settings())
+        self.login_btn.clicked.connect(self._login_user)
+        self.logout_btn.clicked.connect(self._logout_user)
+        layout.addWidget(icon)
+        layout.addWidget(title)
+        layout.addWidget(self.heading_institution)
+        layout.addStretch(1)
+        layout.addWidget(self.heading_user)
+        layout.addWidget(self.user_settings_btn)
+        layout.addWidget(self.login_btn)
+        layout.addWidget(self.logout_btn)
+        return bar
+
+    def _refresh_heading(self) -> None:
+        institution = get_institution()
+        self.heading_institution.setText(institution)
+        self.heading_institution.setVisible(bool(institution))
+        method = get_user_id_method()
+        profile = current_user_profile()
+        label = current_user_label()
+        email = current_user_email()
+        if profile and label:
+            extra = f"  <{email}>" if email else ""
+            self.heading_user.setText(label + extra)
+        elif method == USER_ID_OIDC:
+            self.heading_user.setText("Not signed in")
+        elif method == USER_ID_NONE:
+            self.heading_user.setText("No user")
+        else:
+            self.heading_user.setText("")
+        signed_in = profile is not None
+        self.user_settings_btn.setEnabled(signed_in)
+        self.login_btn.setVisible(method == USER_ID_OIDC and not signed_in)
+        self.logout_btn.setVisible(method == USER_ID_OIDC and signed_in)
+
+    def _scan_new_cases(self) -> None:
+        from .case_notify import scan_and_notify_new_cases_async
+
+        scan_and_notify_new_cases_async()
+
+    def _after_shown(self) -> None:
+        self._scan_new_cases()
+        if user_needs_email():
+            QMessageBox.information(
+                self,
+                "User settings",
+                "This login has no email address. Enter one in User settings "
+                "to receive QA case notifications.",
+            )
+            self.open_user_settings(prompt_email=True)
+
+    def open_user_settings(self, prompt_email: bool = False):
+        from .user_settings_dialog import UserSettingsDialog
+
+        if current_user_profile() is None:
+            QMessageBox.information(
+                self,
+                "User settings",
+                "Sign in first, or set Identity to OSUser in Settings.",
+            )
+            return
+        dlg = UserSettingsDialog(self, prompt_email=prompt_email or user_needs_email())
+        dlg.exec_()
+        self._refresh_heading()
+        self._apply_run_mode_ui()
+
+    def _login_user(self):
+        from .oidc_dialog import OidcLoginDialog
+
+        dlg = OidcLoginDialog(self, can_quit=False)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._refresh_heading()
+        self._apply_run_mode_ui()
+        if user_needs_email():
+            self.open_user_settings(prompt_email=True)
+
+    def _logout_user(self):
+        if (
+            QMessageBox.question(
+                self,
+                "Logout",
+                "Sign out of this Winston-Lutz session?",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        clear_current_user()
+        self._refresh_heading()
+        self._apply_run_mode_ui()
 
     def _build_toolbar(self) -> QWidget:
         open_act = self._make_action("Open Case", "folder", self.open_case, "Ctrl+O")
@@ -1042,10 +1326,14 @@ class MainWindow(QMainWindow):
         if not dlg.did_save:
             return
         self._apply_run_mode_ui()
+        self._refresh_heading()
         if self.folder:
             self.load_folder(self.folder)
+        else:
+            self.setWindowTitle(window_title())
 
     def open_case(self):
+        self._scan_new_cases()
         if is_simple_run_mode():
             self._open_case_simple()
             return
@@ -1519,7 +1807,7 @@ class MainWindow(QMainWindow):
         )
         n_show = len(self.items) if self.items else len(self.beam_ri) if self.plan_beams else len(self.files)
         if self.items or (self.all_ri_required and required_missing):
-            operator = self.items[0].user if self.items else ""
+            operator = session_operator(self.items[0].user if self.items else "")
             self.summary.set_results(
                 case=label,
                 n_images=n_show,
@@ -1676,7 +1964,8 @@ class MainWindow(QMainWindow):
             "Open Case: in Clinic mode, pick a machine and case. In Simple mode, pick the folder that contains RI.*.dcm files (the parent folder is the machine name).\n"
             "Settings: Institution, RunMode, and per-machine folders, plan file, and analysis parameters.\n"
             "Run Analysis: detect field and BB centers (writes {file}_out).\n"
-            "View Report: open report.html in the browser.\n\n"
+            "View Report: open report.html in the browser.\n"
+            "User settings (top bar): email, My machines, and new QA case emails.\n\n"
             "Pan: drag with the left mouse button.\n"
             "Zoom: mouse wheel, or Zoom In/Out.\n"
             "Window/Level: sliders, or Shift+drag / right-drag on the image.\n\n"
@@ -1692,6 +1981,10 @@ class MainWindow(QMainWindow):
 def run_app(argv: list[str] | None = None, folder: str | Path | None = None) -> int:
     import sys
 
+    from .identity import USER_ID_OIDC, USER_ID_OSUSER, get_user_id_method, upsert_os_user_profile
+    from .oidc_dialog import OidcLoginDialog
+    from PyQt5.QtWidgets import QDialog
+
     configure_logging()
     args = list(argv if argv is not None else sys.argv)
     app = QApplication.instance() or QApplication(args)
@@ -1706,6 +1999,14 @@ def run_app(argv: list[str] | None = None, folder: str | Path | None = None) -> 
     app.setFont(font)
     icon = app_icon()
     app.setWindowIcon(icon)
+    method = get_user_id_method()
+    if method == USER_ID_OSUSER:
+        upsert_os_user_profile()
+    if method == USER_ID_OIDC:
+        login = OidcLoginDialog()
+        login.setWindowIcon(icon)
+        if login.exec_() != QDialog.Accepted:
+            return 0
     win = MainWindow()
     win.setWindowIcon(icon)
     if folder:

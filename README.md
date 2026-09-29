@@ -11,10 +11,95 @@ python -m winstonlutz analyze-image path\to\RI.xxx.dcm
 python -m winstonlutz analyze path\to\YY-MM-DD_HH-MM-SS --data-root sample_data
 python -m winstonlutz validate-golden sample_data
 python -m winstonlutz watch --watch-path \\share\QA\2.IGRT --data-root D:\MachineQA\projects\winstonlutz\sample_data
+python -m winstonlutz watch
 python -m winstonlutz gui
 python -m winstonlutz gui path\to\folder\with\RI.dcm
 python -m winstonlutz plan-beams sample_data\Edge\Plan\RP.EdgeDryRun.WL.dcm
 ```
+
+## Replace the C# Windows service
+
+The GUI is **not** the service. C# `WinstonLutzWindowsService` is a headless watcher. The Python equivalent is:
+
+```
+python -m winstonlutz watch
+```
+
+It watches for trigger files matching **`Watcher.file_patterns`** (default **`RE.*.dcm`**), queues the case folder (`case_dir_levels` parents up, default 1), waits a few seconds, then runs the same analysis/report/email path as C# (`winston_lutz_2d.exe` is no longer needed). Subfolders are included when **`recursive`** is true.
+
+### Paths (from the current C# `App.config`)
+
+| C# key | Python | Typical value |
+|---|---|---|
+| Watch Path | `Watcher.watch_path` | `\\varianfs\VA_TRANSFER\QA\2.IGRT` |
+| wl_data_root | `Watcher.data_root` | `\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz` |
+| Log Path | `_logs\` next to the settings file / project | C# used `...\WinstonLutz\_logs` |
+| image_tools_dir | unused | analysis is in-process |
+
+Put those paths and match rules in **Settings → General → Watcher**, or in `winstonlutz.gui.settings.json`:
+
+```json
+"Watcher": {
+  "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT",
+  "data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
+  "recursive": true,
+  "file_patterns": ["RE.*.dcm"],
+  "case_folder_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
+  "case_dir_levels": 1,
+  "poll_sec": 10
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `file_patterns` | Filename globs that start a case. String or JSON array. Empty/missing → `RE.*.dcm`. |
+| `recursive` | Watch subfolders of `watch_path`. Default `true`. |
+| `case_folder_regex` | Case folder **name** must match (Python regex, full match). Missing → same default as machines (`YY-MM-DD_HH-MM-SS`). Empty string → any folder name. |
+| `case_dir_levels` | How many parents above the trigger file is the case folder. `1` = the file’s directory. Use `2` if Aria nests the DICOM one level deeper. |
+| `poll_sec` | Seconds between queue checks. Default `10`. |
+
+The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/RE.*.dcm` → `Edge`; if the parent is `Data`, the grandparent is used). Look up that name in **MACHINES**. `config.txt` and `app.config.txt` are not used. `data_root` is where JSON history and ReportTmplt live: `{data_root}\{machine}\Data\Json` and `{data_root}\{machine}\ReportTmplt` (or the template path on the machine in settings). After analysis the **full** `report.html` is emailed to **Notifications.email.new_case_email_to** (plus any extra addresses on that machine), with `result.png` files inlined (CID). Watcher start/stop goes to **event_email_to**. Crash mail uses **error_email_to**.
+
+For the GUI **Open Case** list to show live cases, set each machine `DATA_FOLDER` to the same tree the watcher writes (for example `\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge` or `...\Edge\Data`).
+
+### Cutover
+
+1. On the service PC, install the `winstonlutz` conda env (or a venv) with `pip install .` from this repo. Confirm:
+
+   ```
+   conda activate winstonlutz
+   python -m winstonlutz watch
+   ```
+
+   Log in as the **same Windows account** the C# service uses (UNC share permissions). You should see `Watcher started on ...`. Leave it running and wait for one new `RE.*.dcm`, or copy a test `RE.*.dcm` into a dummy case folder. Confirm `result.txt` / `report.html` appear. Ctrl+C to stop.
+
+2. **services.msc**: stop **WinstonLutzWindowsService** (or whatever the C# service is named). Do not run C# and Python watchers at the same time — both would process the same case.
+
+3. Install **NSSM** (https://nssm.cc). Admin PowerShell, using the **env’s `python.exe`**, not `python` from PATH:
+
+   ```
+   nssm install WinstonLutzWatch C:\Users\jkim20\AppData\Local\anaconda3\envs\winstonlutz\python.exe
+   nssm set WinstonLutzWatch AppDirectory D:\MachineQA\projects\winstonlutz
+   nssm set WinstonLutzWatch AppParameters "-u -m winstonlutz watch"
+   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\winstonlutz.gui.settings.json
+   nssm set WinstonLutzWatch DisplayName "Winston-Lutz Watch"
+   nssm set WinstonLutzWatch Start SERVICE_AUTO_START
+   nssm set WinstonLutzWatch AppStdout D:\MachineQA\projects\winstonlutz\_logs\watch_stdout.log
+   nssm set WinstonLutzWatch AppStderr D:\MachineQA\projects\winstonlutz\_logs\watch_stderr.log
+   nssm set WinstonLutzWatch AppRotateFiles 1
+   nssm set WinstonLutzWatch ObjectName "DOMAIN\service-account" "password"
+   nssm start WinstonLutzWatch
+   ```
+
+   Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). `AppDirectory` is the project folder so `python -m winstonlutz` can import the package; if you `pip install .` into the env, AppDirectory can be any writable folder that holds the settings JSON.
+
+4. `nssm status WinstonLutzWatch` and check `_logs\winstonlutz_YYYY-MM-DD.log` plus the NSSM stdout/stderr files.
+
+5. After a real linac export, confirm analysis and the short-report email. Then set the C# service to **Disabled** (do not uninstall until you are satisfied).
+
+6. Keep using **python -m winstonlutz gui** (or the desktop exe) on physicist PCs. That is review only; it does not replace the watcher.
+
+`packaging/install_watch_service.ps1` prints the NSSM commands with paths filled in for this machine.
 
 ## CI / CD
 
@@ -40,9 +125,9 @@ The tag must match `vMAJOR.MINOR.PATCH` (for example `v0.1.1`). Each release inc
 
 You can also run **Actions → Release → Run workflow** without a tag; that only uploads build artifacts, it does not create a GitHub Release.
 
-The GUI **Open Case** flow depends on **RunMode**. In **Clinic** mode it picks a machine from settings, then a case folder that contains `RI.*.dcm` files. In **Simple** mode it opens a directory selector for that RI folder and uses the parent folder as the machine name (see [Simple run mode](#simple-run-mode)). **Settings** (toolbar, `Ctrl+,`) edits `Institution`, `RunMode`, and the `MACHINES` list (add/remove, folders, plan file, analysis knobs) and writes `winstonlutz.gui.settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
+The GUI **Open Case** flow depends on **RunMode**. In **Clinic** mode it picks a machine from settings, then a case folder that contains `RI.*.dcm` files. In **Simple** mode it opens a directory selector for that RI folder and uses the parent folder as the machine name (see [Simple run mode](#simple-run-mode)). A heading across the top shows the institution, signed-in user, **User settings**, and **Login** / **Logout** (OIDC). **Settings** (toolbar, `Ctrl+,`) has **General**, **Machines**, then **Notifications**. General is `Institution`, `RunMode`, and **Identity** (`user_id_method`: None, OSUser, or OIDC). Machines is the `MACHINES` list (add/remove, folders, plan file, analysis knobs). Notifications holds **Email** (SMTP plus `error_email_to`, `event_email_to`, `new_case_email_to`) and incoming webhooks for **Google Chat**, **Slack**, **Microsoft Teams**, and **Discord**. Saves go to `winstonlutz.gui.settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
 
-Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executable. Daily logs go in `_logs/winstonlutz_YYYY-MM-DD.log` beside that file (created on startup; older than 7 days are deleted). If the folder cannot be created, file logging is skipped. CLI `-v` and `WINSTONLUTZ_LOG_LEVEL` raise the log level. The window title shows `Institution`. Clinic email settings stay in each machine tree’s `app.config.txt` / `config.txt`. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
+Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executable. Daily logs go in `_logs/winstonlutz_YYYY-MM-DD.log` beside that file (created on startup; older than 7 days are deleted). If the folder cannot be created, file logging is skipped. CLI `-v` and `WINSTONLUTZ_LOG_LEVEL` raise the log level. The window title shows `Institution`. Clinic SMTP is **Settings → Notifications**. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
 
 `validate-golden` re-runs analysis on `sample_data` and compares `result.txt` to the original C++ output (default tolerance 0.1 mm). The repo includes three machines (`Edge`, `Edge_Cone`, `TrueBeam`) with three cases each; analysis outputs (`*_out`, `report.html`) are kept for the newest case only.
 
@@ -82,6 +167,143 @@ Simple mode does not use the `MACHINES` list: no RT Plan table, no HTML report (
 }
 ```
 
+## Identity
+
+**Settings → General → Identity.** `user_id_method` is `None` (default), `OSUser`, or `OIDC`.
+
+| Method | What happens |
+|---|---|
+| `None` | No user id. Clinic settings only. Window title is Institution. Operator comes from DICOM if present. |
+| `OSUser` | Uses the person already logged into Windows / Linux / macOS. No extra login. Writes `_users/<id>.json` (gitignored). If the OS has no email, User settings asks for one. Window title and the top bar show that name. If DICOM OperatorsName is empty, the summary Operator field uses the OS user. |
+| `OIDC` | At startup a **Sign in** dialog opens, then the system browser to the identity provider. After login, the app receives an authorization code on a **loopback** HTTP listener and exchanges it for tokens (Authorization Code + PKCE). |
+
+### What each OS can provide (no extra login)
+
+Email is **not** guaranteed. Domain-joined Windows often has a UPN (`user@hospital.edu`); Linux/macOS local accounts usually do not.
+
+| Field | Windows | Linux | macOS |
+|---|---|---|---|
+| username | `GetUserName` / `%USERNAME%` | `pwd` / `$USER` | same as Linux |
+| display_name | `GetUserNameEx` NameDisplay (AD/full name) | GECOS first field (`/etc/passwd`) | GECOS, else Directory Services `RealName` |
+| email | UPN if it looks like `user@domain` | usually empty | `EMailAddress` in Directory Services if set |
+| domain | `%USERDOMAIN%`, `%USERDNSDOMAIN%`, `DOMAIN\user` (SAM) | — | — |
+| UPN | `GetUserNameEx` NameUserPrincipal | — | — |
+| uid / gid / groups | — | `pwd` + `getgroups` | same as Linux |
+| GeneratedUID | — | — | `dscl` UniqueID |
+| hostname, home, OS version | all | all | all |
+
+### ID provider configuration (OIDC)
+
+OIDC is the protocol. Keycloak (or Entra ID, Okta, Google) is an **issuer**. There is no separate Keycloak method.
+
+Settings JSON (`Identity.oidc`):
+
+```json
+{
+  "Identity": {
+    "user_id_method": "OIDC",
+    "oidc": {
+      "issuer": "https://login.apps.myphysics.net/realms/myphysics",
+      "client_id": "winstonlutz",
+      "scopes": "openid profile email",
+      "redirect_uri": "http://127.0.0.1:17843/callback",
+      "registration_url": "https://login.apps.myphysics.net/realms/myphysics/account/"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `issuer` | Keycloak: `{keycloak_url}/realms/{realm}`. Example: `https://login.apps.myphysics.net` + realm `myphysics`. Discovery: `{issuer}/.well-known/openid-configuration`. |
+| `client_id` | **This desktop app’s** public client (recommended name `winstonlutz`). Not `account-console`. |
+| `scopes` | At least `openid`. `profile` and `email` fill display name and email from the ID token / userinfo. |
+| `redirect_uri` | Loopback return URL the app listens on after the browser login. Must match Keycloak **Valid redirect URIs** exactly. |
+| `registration_url` | Browser page for **Create account**. Use the Keycloak **Account Console** (`{issuer}/account/`), not the static `/protocol/openid-connect/registrations?client_id=account-console` URL. |
+
+Profiles are stored under `_users/` (gitignored), keyed by `oidc:{sub}`.
+
+### Keycloak (myphysics) — native / loopback client
+
+This matches how a native app should talk to the same realm used by Image Labeler 3D (`login.apps.myphysics.net` / `myphysics`). Labeler **registers** in the Account Console and **signs in** with email/password to its API. Winston-Lutz **signs in** in the browser with Authorization Code + PKCE and a loopback redirect (RFC 8252).
+
+Create a dedicated client in Keycloak (realm **myphysics**):
+
+1. **Client ID:** `winstonlutz` (same as `Identity.oidc.client_id`).
+2. **Client type / access:** public (no client secret). Client authentication **Off**.
+3. **Capability:** Standard flow **On**. Direct access grants (password) **Off**. Implicit **Off**.
+4. **PKCE:** required, method **S256** (`code_challenge_method=S256`). Keycloak 26 already requires this for `account-console`; the desktop client must use it too.
+5. **Valid redirect URIs** — add the loopback URI from settings, exactly:
+   - `http://127.0.0.1:17843/callback`
+   - Prefer **`127.0.0.1`**, not `localhost` (IPv4 vs IPv6 / hosts-file surprises).
+   - A wildcard such as `http://127.0.0.1:*` is only OK if your Keycloak version documents it; the app uses a **fixed port** so an exact URI is safer.
+6. **Valid post logout redirect URIs:** optional; same loopback origin if you add logout later.
+7. **Web origins:** `http://127.0.0.1:17843` if the admin console asks for CORS. Token exchange is a native POST, not a browser CORS call.
+8. **Do not** reuse **`account-console`**. That client’s redirects are the Account Console SPA (`…/realms/myphysics/account/`). It will reject `http://127.0.0.1:17843/callback` until you add that URI, and it is the wrong client for this executable.
+
+**Loopback listener:** on **Sign in**, the app binds `127.0.0.1:17843`, opens the system browser to Keycloak, and waits for `/callback?code=…`. Windows may show a firewall prompt for Python/the exe the first time — allow private networks. If the port is in use, change `redirect_uri` in Settings and update Valid redirect URIs to match.
+
+**Registration:** open `{issuer}/account/` (Create account on the Sign in dialog). The Account Console SPA starts OIDC **with PKCE**, then Register. Do **not** use:
+
+`…/protocol/openid-connect/registrations?client_id=account-console&response_type=code&scope=openid&redirect_uri=…`
+
+Keycloak 26 rejects that URL because `account-console` requires `code_challenge_method`. Image Labeler 3D already rewrites that broken URL to `/realms/{realm}/account/`. Winston-Lutz does the same if an old settings file still has it.
+
+**After login:** the ID token / userinfo `sub` is the stable user id. Email and name come from claims when `email` / `profile` scopes are granted.
+
+### User bar, User settings, My machines
+
+The main window has a heading across the top: app name, institution, **current user** (name and email), **User settings**, and **Login** / **Logout** (OIDC only). OSUser has no login/logout; the OS person is already the user.
+
+**User settings** (per profile under `_users/`):
+
+| Field | Meaning |
+|---|---|
+| Email | Required for QA notification mail. Taken from OIDC claims or OS (Windows UPN / macOS Directory Services) when present. If **OSUser** (or OIDC) has no email, the app prompts you to enter one here. |
+| My machines | Check the linacs you are responsible for (names from clinic **Settings → Machines**). |
+| New QA case emails | **Off**, **My machines**, or **All machines**. Uses clinic SMTP (`Settings → Notifications` `email_from` + `email_host_address`). Does not use `error_email_to`. |
+
+Existing case folders are remembered on first launch so you are not emailed for history. A later new case folder (or the directory watcher) emails subscribers once per machine/case.
+
+## Notifications
+
+**Settings → Notifications** (after Machines). Uncaught exceptions and `logger.exception` events are sent to **error_email_to** and every chat channel that is filled in. Watcher start/stop goes to **event_email_to**. The full IGRT report after watcher analysis goes to **new_case_email_to**. Empty arrays turn that mail off. Each section has a **Send test** button that uses the values currently in the form (Save is not required). A success or SMTP/webhook error dialog is shown.
+
+| Section | JSON | Notes |
+|---|---|---|
+| Email | `Notifications.email` | SMTP plus three address lists (**JSON arrays**, or a legacy string). Local parts use `email_domain`. Needs `email_from` and `email_host_address`. Empty array = that mail off. `email_from_enc_pw` is kept in JSON if you use authenticated SMTP. |
+| `error_email_to` | crashes, `logger.exception`, missing watch folder | Sample: `["jinkoo.kim@stonybrookmedicine.edu"]`. |
+| `event_email_to` | watcher start/stop | Same array form. |
+| `new_case_email_to` | clinic-wide IGRT report after analysis | A machine may still list extra addresses. |
+| Google Chat | `Notifications.google_chat.webhook_url` | Incoming webhook for a Chat space. Posted as `{"text": "..."}`. |
+| Slack | `Notifications.slack.webhook_url` | Incoming webhook for a channel. Posted as `{"text": "..."}`. |
+| Microsoft Teams | `Notifications.microsoft_teams.webhook_url` | Incoming webhook (Workflows or Office 365 connector). Posted as `{"text": "..."}`. |
+| Discord | `Notifications.discord.webhook_url` | Channel webhook. Posted as `{"content": "..."}`. |
+
+Copy `winstonlutz.gui.settings.sample.json` to `winstonlutz.gui.settings.json` next to the executable (the live file is gitignored). `settings.json` and `configs.json` are also gitignored; `configs.sample.json` is a short SMTP/webhook template. SMTP fields live only under `Notifications.email`. Older files with top-level `email_*` / `error_email_to` still work if `Notifications.email` is absent. Saving Settings writes the nested `Notifications` block and drops those top-level email keys.
+
+## Post-processing
+
+After analysis (watcher or GUI), winstonlutz runs **Settings → Post-processing** steps in order. Today there is one type: **`docuforms2_igrt`**, ported from `_ref_projects/docuforms_import/scripts/upload_igrt`.
+
+```json
+"PostProcessing": [
+  {
+    "type": "docuforms2_igrt",
+    "enabled": true,
+    "backend_url": "https://roweb3.uhmc.sbuh.stonybrook.edu:9001",
+    "verify_ssl": false,
+    "dry_run": false,
+    "attach_dcm_zip": true,
+    "attach_pdf": false,
+    "resubmit": false,
+    "timeout_sec": 300
+  }
+]
+```
+
+It submits beam offsets and result.png images to `POST {backend_url}/api/forms/{form_id}/submit`, optionally uploads `input_dcm.zip` to `/api/upload`. Form id is per machine (`docuforms2_form_id`). A successful upload writes `.docuforms2_igrt.json` in the case folder so the same case is not submitted again (`resubmit` overrides). Cases are **not** moved to `imported/`. Add further objects to the `PostProcessing` array later for other steps.
+
 ## Machine settings (`winstonlutz.gui.settings.json`)
 
 Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings → Machines**, or the JSON file. After changing geometry or classification keys, **re-run analysis** on a known case before trusting new numbers — offsets in `result.txt` are not comparable across different `crop_mm` / `sad_mm`.
@@ -92,18 +314,16 @@ Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings →
 |---|---|---|
 | `Institution` (top-level) | Shown in the GUI window title. | Set once per PC to the hospital name. |
 | `RunMode` (top-level) | `Clinic` (default) or `Simple`. Simple also applies when the settings file is missing or `MACHINES` is empty. | Use `Simple` for a one-folder Open Case picker without a machine list. |
-| `error_email_to` (top-level) | If set, uncaught exceptions and `logger.exception` events are emailed with traceback, host, version, and argv. Full address or a local part (with `email_domain`). Empty/missing = no error email. | `jinkoo.kim@stonybrookmedicine.edu` |
-| `email_from`, `email_domain`, `email_host_address`, `email_host_port`, `enable_ssl` | SMTP used for error emails (and required together with `error_email_to`). `email_from_enc_pw` stays in JSON if you need authenticated SMTP; leave empty for open relay. | Match clinic `app.config.txt`. |
-
-Copy `winstonlutz.gui.settings.sample.json` to `winstonlutz.gui.settings.json` next to the executable (the live file is gitignored). `settings.json` and `configs.json` are also gitignored; `configs.sample.json` is the SMTP-only template if you keep a separate overlay file locally.
 | `NAME` | Label in **Open Case** and in reports. | New machine, or to match the folder name under the data tree. |
 | `DATA_FOLDER` | Directory that contains case folders (`YY-MM-DD_HH-MM-SS`). | Path to that linac’s `Data` folder on this PC. |
 | `DICOM_PLAN_FILE` | Path to that machine’s RT Plan (`RP*.dcm`). When set, **Open Case** builds the table from plan beams (Beam, Name, Type, Gantry, Table, Coll) and matches each `RI.*.dcm` by `ReferencedBeamNumber`. The first read writes `{RP file}.json` beside it; later opens use that JSON unless the DICOM is newer or the JSON is missing. | Edge sample: `sample_data/Edge/Plan/RP.EdgeDryRun.WL.dcm`. Omit until you have a plan; the table is one row per RI and **Name** is `Gxxx_Tyyy_Czzz` from the snapped angles. |
 | `IGNORE_BEAMS` | Plan beam numbers that are listed in the table but not scored. No RI shows **NA** (not Missing). They never fail `ALL_RI_IMAGE_REQUIRED`. | Edge CBCT is beam `2`: `[2]`. Omit or `[]` if every listed beam should be acquired. |
 | `ALL_RI_IMAGE_REQUIRED` | If `true`, any required plan beam without a matching RI makes the case **Fail**. If `false` (default), pass/fail uses only acquired images; missing beams are labeled Missing but do not fail the case. | Set `true` only when every WL beam must be imaged. `IGNORE_BEAMS` (and CBCT by name) are never required. |
-| `REPORT_TEMPLATE_FILE_PATH` | Path to `report1.tmpl.html` (the `full` template). The `full`/`short` sibling folders are inferred from this. | Point at that machine’s `ReportTmplt\\full\\report1.tmpl.html`. |
+| `REPORT_TEMPLATE_FILE_PATH` | Path to `report1.tmpl.html` (the `full` template). The `full`/`short` sibling folders are inferred from this. After a watcher analysis, this **full** `report.html` is emailed (images inlined via CID). | Point at that machine’s `ReportTmplt\\full\\report1.tmpl.html`. |
 | `CASE_FOLDER_NAME_REGEX` | Only folders whose names match are treated as cases. Default `^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$`. | Different export naming (e.g. four-digit year). Empty/missing uses the default. |
 | `record_csv_file` | Append-only CSV of date, time, operator, max *d*, G/T/C. | Clinic share path for trending; leave blank to skip CSV. |
+| `new_case_email_to` | Optional extra IGRT-report addresses for this machine, added to **Notifications.email.new_case_email_to**. Empty = clinic list only. | Leave empty unless this linac needs extra people. |
+| `docuforms2_form_id` | DocuForms2 form id for post-analysis upload. Empty = skip this machine. | Edge `sb_edge_mlc_wl`, Edge_Cone `sb_edge_cone_wl`, TrueBeam `sb_truebeam_mlc_wl`. |
 
 ### Pass/fail and BB search
 
@@ -183,7 +403,7 @@ For each RI DICOM:
 6. Scale offsets to isocenter: `scale = sad_mm / SID_mm` (defaults **SAD 1000 mm**, SID from DICOM `3002|0026`, fallback `default_sid_mm` **1500 mm**).
 7. Write `{file}_out/result.txt` and `result.png` (center crop, Laplacian-of-Gaussian σ=1, min-max to 8-bit, red FC / green BB crosses).
 
-`result.txt` stores isocenter-plane coordinates. The key `bb_cetner` is the historical typo from the C++ output. New runs also write `bb_search=` (`ConnectedComponent`, `LoG`, or `OtsuThreshold`). When the GUI opens a folder, it restores **MV BB Detection** / **kV BB Detection** from `bb_search` in `result.txt`, then the machine `config.txt`, then `{file}_out/log.txt`.
+`result.txt` stores isocenter-plane coordinates. The key `bb_cetner` is the historical typo from the C++ output. New runs also write `bb_search=` (`ConnectedComponent`, `LoG`, or `OtsuThreshold`). When the GUI opens a folder, it restores **MV BB Detection** / **kV BB Detection** from `bb_search` in `result.txt`, then the machine entry in settings JSON, then `{file}_out/log.txt`.
 
 ## Determining MV vs kV
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from winstonlutz.app_settings import SETTINGS_NAME, app_dir, user_config_path
 from winstonlutz.config import Param
 
@@ -53,6 +55,36 @@ def test_find_machine_for_folder(tmp_path, monkeypatch):
         pass
 
 
+def test_machine_name_is_case_parent(tmp_path, monkeypatch):
+    from winstonlutz.app_settings import (
+        find_machine_by_name,
+        find_machine_for_folder,
+        save_gui_settings,
+        simple_machine_name,
+    )
+
+    case = tmp_path / "Edge" / "26-09-23_06-21-08"
+    case.mkdir(parents=True)
+    (case / "RE.1.dcm").write_bytes(b"")
+    assert simple_machine_name(case) == "Edge"
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / SETTINGS_NAME))
+    save_gui_settings({"MACHINES": [{"NAME": "Edge", "DATA_FOLDER": str(tmp_path / "other")}]})
+    assert find_machine_by_name("Edge")["NAME"] == "Edge"
+    assert find_machine_for_folder(case)["NAME"] == "Edge"
+
+
+def test_html_cid_images(tmp_path):
+    from winstonlutz.emailer import html_with_cid_images
+
+    png = tmp_path / "RI.1.dcm_out" / "result.png"
+    png.parent.mkdir()
+    png.write_bytes(b"\x89PNG\r\n")
+    html = '<img src=".\\RI.1.dcm_out\\result.png" width="200"/>'
+    out, images = html_with_cid_images(html, tmp_path)
+    assert "cid:wl0" in out
+    assert images == [("wl0", png.resolve())]
+
+
 def test_list_case_folders_skips_empty(tmp_path):
     from winstonlutz.pipeline import case_has_ri, list_case_candidates, list_case_folders
 
@@ -78,6 +110,43 @@ def test_list_case_folders_skips_empty(tmp_path):
     assert not case_has_ri(empty)
     cases = list_case_folders(machine)
     assert [p.name for p in cases] == ["26-09-25_06-15-37"]
+
+
+def test_case_open_status_from_report(tmp_path):
+    from winstonlutz.pipeline import case_has_html_report, case_open_status
+
+    case = tmp_path / "26-09-25_06-15-37"
+    case.mkdir()
+    assert case_open_status(case) == "new"
+    assert not case_has_html_report(case)
+    (case / "report.html").write_text(
+        '<span class="input-group-addon" id="basic-addon1">Result</span>\n'
+        '<input type="text" class="form-control" value="Fail">',
+        encoding="utf-8",
+    )
+    assert case_has_html_report(case)
+    assert case_open_status(case) == "fail"
+    (case / "report.html").write_text(
+        '<span class="input-group-addon" id="basic-addon1">Result</span>\n'
+        '<input type="text" class="form-control" value="Pass">',
+        encoding="utf-8",
+    )
+    assert case_open_status(case) == "pass"
+
+
+def test_case_open_status_sample_report():
+    from winstonlutz.pipeline import case_open_status
+
+    sample = (
+        Path(__file__).resolve().parent.parent
+        / "sample_data"
+        / "Edge"
+        / "Data"
+        / "26-09-24_06-13-24"
+    )
+    if not sample.is_dir():
+        return
+    assert case_open_status(sample) == "pass"
 
 
 def test_case_result_status_new(tmp_path):
@@ -226,7 +295,7 @@ def test_is_simple_run_mode(tmp_path, monkeypatch):
     assert simple_machine_name(nested) == "Edge"
 
 
-def test_error_email_settings_and_addresses():
+def test_error_email_settings_and_addresses(monkeypatch):
     from winstonlutz.emailer import error_email_settings, recipient_addresses
 
     assert recipient_addresses("jinkoo.kim@stonybrookmedicine.edu") == [
@@ -235,11 +304,22 @@ def test_error_email_settings_and_addresses():
     assert recipient_addresses("jinkoo.kim", "stonybrookmedicine.edu") == [
         "jinkoo.kim@stonybrookmedicine.edu"
     ]
+    assert recipient_addresses(
+        ["jinkoo.kim@stonybrookmedicine.edu", "physics@stonybrookmedicine.edu"]
+    ) == [
+        "jinkoo.kim@stonybrookmedicine.edu",
+        "physics@stonybrookmedicine.edu",
+    ]
+    assert recipient_addresses(["jinkoo.kim", "physics"], "stonybrookmedicine.edu") == [
+        "jinkoo.kim@stonybrookmedicine.edu",
+        "physics@stonybrookmedicine.edu",
+    ]
     assert error_email_settings({}) is None
+    assert error_email_settings({"error_email_to": ["a@b.c"]}) is None
     assert error_email_settings({"error_email_to": "a@b.c"}) is None
     cfg = error_email_settings(
         {
-            "error_email_to": "jinkoo.kim@stonybrookmedicine.edu",
+            "error_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
             "email_from": "radonc.physics",
             "email_domain": "stonybrookmedicine.edu",
             "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
@@ -248,5 +328,141 @@ def test_error_email_settings_and_addresses():
         }
     )
     assert cfg is not None
-    assert cfg["to"] == "jinkoo.kim@stonybrookmedicine.edu"
+    assert cfg["to"] == ["jinkoo.kim@stonybrookmedicine.edu"]
     assert cfg["host"] == "uhmc-imail.uhmc.sunysb.edu"
+    many = error_email_settings(
+        {
+            "error_email_to": [
+                "jinkoo.kim@stonybrookmedicine.edu",
+                "physics@stonybrookmedicine.edu",
+            ],
+            "email_from": "radonc.physics",
+            "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+        }
+    )
+    assert many is not None
+    assert many["to"] == [
+        "jinkoo.kim@stonybrookmedicine.edu",
+        "physics@stonybrookmedicine.edu",
+    ]
+    nested = error_email_settings(
+        {
+            "Notifications": {
+                "email": {
+                    "error_email_to": ["a@b.c", "d@e.f"],
+                    "email_from": "radonc.physics",
+                    "email_host_address": "mail.example.edu",
+                    "email_host_port": 25,
+                }
+            }
+        }
+    )
+    assert nested is not None
+    assert nested["to"] == ["a@b.c", "d@e.f"]
+    assert nested["host"] == "mail.example.edu"
+    from winstonlutz.emailer import event_email_settings, igrt_report_recipients
+
+    assert event_email_settings({}) is None
+    events = event_email_settings(
+        {
+            "Notifications": {
+                "email": {
+                    "event_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+                    "email_from": "radonc.physics",
+                    "email_host_address": "mail.example.edu",
+                }
+            }
+        }
+    )
+    assert events is not None
+    assert events["to"] == ["jinkoo.kim@stonybrookmedicine.edu"]
+    report_to = igrt_report_recipients(
+        {"new_case_email_to": ["extra@hospital.edu"]},
+        {
+            "Notifications": {
+                "email": {
+                    "new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+                    "email_from": "radonc.physics",
+                    "email_host_address": "mail.example.edu",
+                }
+            }
+        },
+    )
+    assert report_to == [
+        "jinkoo.kim@stonybrookmedicine.edu",
+        "extra@hospital.edu",
+    ]
+    same = igrt_report_recipients(
+        {"new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"]},
+        {
+            "Notifications": {
+                "email": {
+                    "new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+                    "email_from": "radonc.physics",
+                    "email_host_address": "mail.example.edu",
+                }
+            }
+        },
+    )
+    assert same == ["jinkoo.kim@stonybrookmedicine.edu"]
+    legacy = error_email_settings(
+        {
+            "error_email_to": "a@b.c, d@e.f",
+            "email_from": "radonc.physics",
+            "email_host_address": "mail.example.edu",
+        }
+    )
+    assert legacy is not None
+    assert legacy["to"] == ["a@b.c", "d@e.f"]
+    from winstonlutz.app_settings import chat_webhook_urls
+    from winstonlutz.emailer import post_chat_webhooks
+
+    hooks = chat_webhook_urls(
+        {"Notifications": {"google_chat": {"webhook_url": "https://chat.example/hook"}}}
+    )
+    assert hooks["google_chat"] == "https://chat.example/hook"
+    assert hooks["slack"] == ""
+    posted = []
+
+    def fake_post(url, payload):
+        posted.append((url, payload))
+
+    monkeypatch.setattr("winstonlutz.emailer._post_webhook", fake_post)
+    post_chat_webhooks(
+        "boom",
+        "traceback",
+        context="test",
+        data={
+            "Notifications": {
+                "slack": {"webhook_url": "https://hooks.slack.com/x"},
+                "discord": {"webhook_url": "https://discord.com/api/webhooks/x"},
+            }
+        },
+    )
+    urls = {item[0] for item in posted}
+    assert urls == {"https://hooks.slack.com/x", "https://discord.com/api/webhooks/x"}
+    by_url = {item[0]: item[1] for item in posted}
+    assert "text" in by_url["https://hooks.slack.com/x"]
+    assert "content" in by_url["https://discord.com/api/webhooks/x"]
+
+    from winstonlutz.emailer import send_test_chat, send_test_email
+
+    try:
+        send_test_email({})
+        raise AssertionError("expected missing SMTP fields")
+    except RuntimeError as exc:
+        assert "email_from" in str(exc)
+    posted.clear()
+    try:
+        send_test_chat("slack", {"Notifications": {"slack": {"webhook_url": ""}}})
+        raise AssertionError("expected missing webhook")
+    except RuntimeError as exc:
+        assert "webhook_url" in str(exc)
+    send_test_chat(
+        "google_chat",
+        {"Notifications": {"google_chat": {"webhook_url": "https://chat.example/hook"}}},
+    )
+    assert len(posted) == 1
+    assert posted[0][0] == "https://chat.example/hook"
+    assert "text" in posted[0][1]
+    assert "notification test" in posted[0][1]["text"]

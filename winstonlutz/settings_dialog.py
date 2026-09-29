@@ -1,12 +1,15 @@
-"""Tabbed Settings dialog: General (Institution) and Machines."""
+"""Tabbed Settings dialog: General, Machines, and Notifications."""
 
 from __future__ import annotations
 
 import copy
+from functools import partial
 from pathlib import Path
 
-from PyQt5.QtCore import QSettings, QTimer, Qt
+from PyQt5.QtCore import QSettings, QTimer, QUrl, Qt
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -20,6 +23,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -29,26 +33,67 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .emailer import (
+    CHAT_CHANNEL_LABELS,
+    error_email_to_list,
+    format_error_email_to,
+    send_test_chat,
+    send_test_email,
+)
+from .identity import (
+    DEFAULT_OIDC_CLIENT_ID,
+    DEFAULT_OIDC_ISSUER,
+    DEFAULT_OIDC_REDIRECT_URI,
+    DEFAULT_OIDC_REGISTRATION_URL,
+    DEFAULT_OIDC_SCOPES,
+    IDENTITY_KEY,
+    USER_ID_METHODS,
+    USER_ID_NONE,
+    USER_ID_OIDC,
+    USER_ID_OSUSER,
+    coerce_registration_url,
+    format_os_user_preview,
+    get_user_id_method,
+    identity_block,
+    oidc_settings,
+    upsert_os_user_profile,
+)
+
 from .app_settings import (
     BB_SEARCH_METHODS,
+    DOCUFORMS2_IGRT_TYPE,
     ERROR_EMAIL_TO_KEY,
+    EVENT_EMAIL_TO_KEY,
     INSTITUTION_KEY,
     KV_FIELD_SEARCH_METHODS,
     MACHINES_KEY,
     MV_FIELD_SEARCH_METHODS,
+    NEW_CASE_EMAIL_TO_KEY,
+    NOTIFICATIONS_KEY,
+    POST_PROCESSING_KEY,
     RUN_MODE_CLINIC,
     RUN_MODE_KEY,
     RUN_MODES,
+    TOP_LEVEL_EMAIL_KEYS,
+    WATCHER_KEY,
+    chat_webhook_urls,
+    default_docuforms2_igrt_step,
     default_machine,
+    email_settings_block,
+    find_post_step,
     format_csv_numbers,
     get_institution,
     get_machines,
     get_run_mode,
     load_gui_settings,
+    normalize_file_patterns,
     parse_csv_numbers,
     parse_int_list,
+    post_processing_steps,
     save_gui_settings,
     user_config_path,
+    upsert_post_step,
+    watcher_settings,
 )
 
 
@@ -84,6 +129,12 @@ class MachineForm(QWidget):
         self.report_template = QLineEdit()
         self.case_regex = QLineEdit()
         self.record_csv = QLineEdit()
+        self.new_case_email_to = QPlainTextEdit()
+        self.new_case_email_to.setTabChangesFocus(True)
+        self.new_case_email_to.setFixedHeight(72)
+        self.new_case_email_to.setPlaceholderText("optional extra addresses for this machine")
+        self.docuforms2_form_id = QLineEdit()
+        self.docuforms2_form_id.setPlaceholderText("sb_edge_mlc_wl")
         self.plan_file = QLineEdit()
         self.ignore_beams = QLineEdit()
         self.all_ri_required = QCheckBox("Require every plan beam (except IGNORE_BEAMS)")
@@ -167,6 +218,8 @@ class MachineForm(QWidget):
         form.addRow("REPORT_TEMPLATE_FILE_PATH", self._path_row(self.report_template, "html"))
         form.addRow("CASE_FOLDER_NAME_REGEX", self.case_regex)
         form.addRow("record_csv_file", self.record_csv)
+        form.addRow("new_case_email_to", self.new_case_email_to)
+        form.addRow("docuforms2_form_id", self.docuforms2_form_id)
         return form
 
     def _plan_form(self) -> QFormLayout:
@@ -223,6 +276,8 @@ class MachineForm(QWidget):
         self.report_template.setText(str(m.get("REPORT_TEMPLATE_FILE_PATH") or ""))
         self.case_regex.setText(str(m.get("CASE_FOLDER_NAME_REGEX") or ""))
         self.record_csv.setText(str(m.get("record_csv_file") or ""))
+        self.new_case_email_to.setPlainText(format_error_email_to(m.get("new_case_email_to")))
+        self.docuforms2_form_id.setText(str(m.get("docuforms2_form_id") or ""))
         self.plan_file.setText(str(m.get("DICOM_PLAN_FILE") or ""))
         self.ignore_beams.setText(format_csv_numbers(m.get("IGNORE_BEAMS")))
         self.all_ri_required.setChecked(_as_bool(m.get("ALL_RI_IMAGE_REQUIRED")))
@@ -269,6 +324,8 @@ class MachineForm(QWidget):
         data["REPORT_TEMPLATE_FILE_PATH"] = self.report_template.text().strip()
         data["CASE_FOLDER_NAME_REGEX"] = self.case_regex.text().strip()
         data["record_csv_file"] = self.record_csv.text().strip()
+        data["new_case_email_to"] = error_email_to_list(self.new_case_email_to.toPlainText())
+        data["docuforms2_form_id"] = self.docuforms2_form_id.text().strip()
         data["DICOM_PLAN_FILE"] = self.plan_file.text().strip()
         data["IGNORE_BEAMS"] = parse_int_list(self.ignore_beams.text())
         data["ALL_RI_IMAGE_REQUIRED"] = self.all_ri_required.isChecked()
@@ -323,29 +380,129 @@ class SettingsDialog(QDialog):
         self.run_mode.addItems(list(RUN_MODES))
         mode_idx = self.run_mode.findText(get_run_mode(self._original))
         self.run_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
-        self.error_email_to = QLineEdit()
-        self.error_email_to.setText(str(self._original.get(ERROR_EMAIL_TO_KEY) or ""))
-        self.error_email_to.setPlaceholderText("jinkoo.kim@stonybrookmedicine.edu")
+        email = email_settings_block(self._original)
+        self.error_email_to = QPlainTextEdit()
+        self.error_email_to.setPlainText(format_error_email_to(email.get(ERROR_EMAIL_TO_KEY)))
+        self.error_email_to.setPlaceholderText("one address per line")
+        self.error_email_to.setTabChangesFocus(True)
+        self.error_email_to.setFixedHeight(72)
+        self.event_email_to = QPlainTextEdit()
+        self.event_email_to.setPlainText(format_error_email_to(email.get(EVENT_EMAIL_TO_KEY)))
+        self.event_email_to.setPlaceholderText("one address per line")
+        self.event_email_to.setTabChangesFocus(True)
+        self.event_email_to.setFixedHeight(72)
+        self.notify_new_case_email_to = QPlainTextEdit()
+        self.notify_new_case_email_to.setPlainText(
+            format_error_email_to(email.get(NEW_CASE_EMAIL_TO_KEY))
+        )
+        self.notify_new_case_email_to.setPlaceholderText("one address per line")
+        self.notify_new_case_email_to.setTabChangesFocus(True)
+        self.notify_new_case_email_to.setFixedHeight(72)
         self.email_from = QLineEdit()
-        self.email_from.setText(str(self._original.get("email_from") or ""))
+        self.email_from.setText(str(email.get("email_from") or ""))
         self.email_domain = QLineEdit()
-        self.email_domain.setText(str(self._original.get("email_domain") or ""))
+        self.email_domain.setText(str(email.get("email_domain") or ""))
         self.email_host = QLineEdit()
-        self.email_host.setText(str(self._original.get("email_host_address") or ""))
+        self.email_host.setText(str(email.get("email_host_address") or ""))
         self.email_port = QSpinBox()
         self.email_port.setRange(1, 65535)
         try:
-            self.email_port.setValue(int(self._original.get("email_host_port") or 25))
+            self.email_port.setValue(int(email.get("email_host_port") or 25))
         except (TypeError, ValueError):
             self.email_port.setValue(25)
-        self.email_ssl = QCheckBox("enable_ssl")
-        ssl_val = self._original.get("enable_ssl", False)
+        self.email_ssl = QCheckBox("Use STARTTLS (enable_ssl)")
+        ssl_val = email.get("enable_ssl", False)
         if isinstance(ssl_val, str):
             ssl_val = ssl_val.strip().lower() in ("true", "1", "yes")
         self.email_ssl.setChecked(bool(ssl_val))
+        hooks = chat_webhook_urls(self._original)
+        self.google_chat_url = QLineEdit()
+        self.google_chat_url.setText(hooks.get("google_chat") or "")
+        self.google_chat_url.setPlaceholderText("https://chat.googleapis.com/v1/spaces/.../messages?key=...")
+        self.slack_url = QLineEdit()
+        self.slack_url.setText(hooks.get("slack") or "")
+        self.slack_url.setPlaceholderText("https://hooks.slack.com/services/...")
+        self.teams_url = QLineEdit()
+        self.teams_url.setText(hooks.get("microsoft_teams") or "")
+        self.teams_url.setPlaceholderText("https://...webhook.office.com/webhookb2/...")
+        self.discord_url = QLineEdit()
+        self.discord_url.setText(hooks.get("discord") or "")
+        self.discord_url.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.path_label = QLabel(str(user_config_path()))
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(True)
+        watcher = watcher_settings(self._original)
+        self.watch_path = QLineEdit()
+        self.watch_path.setText(watcher.get("watch_path") or "")
+        self.watch_path.setPlaceholderText(r"\\varianfs\VA_TRANSFER\QA\2.IGRT")
+        self.watch_data_root = QLineEdit()
+        self.watch_data_root.setText(watcher.get("data_root") or "")
+        self.watch_data_root.setPlaceholderText(r"\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz")
+        self.watch_recursive = QCheckBox("Watch subfolders (recursive)")
+        self.watch_recursive.setChecked(bool(watcher.get("recursive", True)))
+        self.watch_file_patterns = QPlainTextEdit()
+        self.watch_file_patterns.setPlainText("\n".join(watcher.get("file_patterns") or []))
+        self.watch_file_patterns.setPlaceholderText("RE.*.dcm")
+        self.watch_file_patterns.setTabChangesFocus(True)
+        self.watch_file_patterns.setFixedHeight(56)
+        self.watch_case_folder_regex = QLineEdit()
+        self.watch_case_folder_regex.setText(str(watcher.get("case_folder_regex") or ""))
+        self.watch_case_folder_regex.setPlaceholderText(r"^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+        self.watch_case_dir_levels = QSpinBox()
+        self.watch_case_dir_levels.setRange(1, 8)
+        self.watch_case_dir_levels.setValue(int(watcher.get("case_dir_levels") or 1))
+        self.watch_poll_sec = QDoubleSpinBox()
+        self.watch_poll_sec.setRange(0.5, 3600.0)
+        self.watch_poll_sec.setDecimals(1)
+        self.watch_poll_sec.setValue(float(watcher.get("poll_sec") or 10.0))
+        df = {**default_docuforms2_igrt_step(), **find_post_step(DOCUFORMS2_IGRT_TYPE, self._original)}
+        self.df_enabled = QCheckBox("Upload IGRT results to DocuForms2 after analysis")
+        self.df_enabled.setChecked(_as_bool(df.get("enabled", True)))
+        self.df_backend = QLineEdit()
+        self.df_backend.setText(str(df.get("backend_url") or ""))
+        self.df_backend.setPlaceholderText("https://roweb3.uhmc.sbuh.stonybrook.edu:9001")
+        self.df_verify_ssl = QCheckBox("Verify SSL")
+        self.df_verify_ssl.setChecked(_as_bool(df.get("verify_ssl", False)))
+        self.df_dry_run = QCheckBox("Dry run (parse only, do not submit)")
+        self.df_dry_run.setChecked(_as_bool(df.get("dry_run", False)))
+        self.df_zip = QCheckBox("Attach input_dcm.zip")
+        self.df_zip.setChecked(_as_bool(df.get("attach_dcm_zip", True)))
+        self.df_pdf = QCheckBox("Attach report.pdf (needs weasyprint)")
+        self.df_pdf.setChecked(_as_bool(df.get("attach_pdf", False)))
+        self.df_resubmit = QCheckBox("Resubmit cases that already have .docuforms2_igrt.json")
+        self.df_resubmit.setChecked(_as_bool(df.get("resubmit", False)))
+        self.df_timeout = QSpinBox()
+        self.df_timeout.setRange(30, 3600)
+        try:
+            self.df_timeout.setValue(int(df.get("timeout_sec") or 300))
+        except (TypeError, ValueError):
+            self.df_timeout.setValue(300)
+        oidc = oidc_settings(self._original)
+        self.user_id_method = QComboBox()
+        self.user_id_method.addItems(list(USER_ID_METHODS))
+        method_idx = self.user_id_method.findText(get_user_id_method(self._original))
+        self.user_id_method.setCurrentIndex(method_idx if method_idx >= 0 else 0)
+        self.user_id_method.currentTextChanged.connect(self._sync_identity_ui)
+        self.os_user_preview = QPlainTextEdit()
+        self.os_user_preview.setReadOnly(True)
+        self.os_user_preview.setTabChangesFocus(True)
+        self.os_user_preview.setFixedHeight(140)
+        self.oidc_issuer = QLineEdit()
+        self.oidc_issuer.setText(oidc["issuer"] or DEFAULT_OIDC_ISSUER)
+        self.oidc_issuer.setPlaceholderText(DEFAULT_OIDC_ISSUER)
+        self.oidc_client_id = QLineEdit()
+        self.oidc_client_id.setText(oidc["client_id"] or DEFAULT_OIDC_CLIENT_ID)
+        self.oidc_scopes = QLineEdit()
+        self.oidc_scopes.setText(oidc["scopes"] or DEFAULT_OIDC_SCOPES)
+        self.oidc_redirect = QLineEdit()
+        self.oidc_redirect.setText(oidc.get("redirect_uri") or DEFAULT_OIDC_REDIRECT_URI)
+        self.oidc_redirect.setPlaceholderText(DEFAULT_OIDC_REDIRECT_URI)
+        self.oidc_registration = QLineEdit()
+        self.oidc_registration.setText(oidc["registration_url"] or DEFAULT_OIDC_REGISTRATION_URL)
+        self.oidc_register_btn = QPushButton("Open registration")
+        self.oidc_register_btn.setAutoDefault(False)
+        self.oidc_register_btn.setDefault(False)
+        self.oidc_register_btn.clicked.connect(self._open_oidc_registration)
 
         self.machine_list = QListWidget()
         self.form = MachineForm()
@@ -361,6 +518,8 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._general_page(), "General")
         tabs.addTab(self._machines_page(), "Machines")
+        tabs.addTab(self._notifications_page(), "Notifications")
+        tabs.addTab(self._postprocess_page(), "Post-processing")
 
         self.save_btn = QPushButton("Save")
         self.close_btn = QPushButton("Close")
@@ -393,26 +552,269 @@ class SettingsDialog(QDialog):
 
     def _general_page(self) -> QWidget:
         page = QWidget()
-        form = QFormLayout(page)
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
         form.addRow("Institution", self.institution)
         form.addRow("RunMode", self.run_mode)
-        form.addRow("error_email_to", self.error_email_to)
-        form.addRow("email_from", self.email_from)
-        form.addRow("email_domain", self.email_domain)
-        form.addRow("email_host_address", self.email_host)
-        form.addRow("email_host_port", self.email_port)
-        form.addRow("", self.email_ssl)
         form.addRow("Settings file", self.path_label)
         hint = QLabel(
             "Clinic: Open Case picks a configured machine, then a case. "
             "Simple: Open Case picks a folder of RI images; the parent folder is the machine name. "
             "Simple is also used when this file is missing or MACHINES is empty. "
-            "If error_email_to is set (with email_from and email_host_address), uncaught exceptions "
-            "and logger.exception events are emailed."
+            "Error alerts (email and chat) are on the Notifications tab."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #64748b;")
         form.addRow("", hint)
+        layout.addLayout(form)
+        layout.addWidget(self._identity_group())
+        layout.addWidget(self._watcher_group())
+        layout.addStretch(1)
+        return page
+
+    def _watcher_group(self) -> QGroupBox:
+        form = QFormLayout()
+        form.addRow("watch_path", self.watch_path)
+        form.addRow("data_root", self.watch_data_root)
+        form.addRow("", self.watch_recursive)
+        form.addRow("file_patterns", self.watch_file_patterns)
+        form.addRow("case_folder_regex", self.watch_case_folder_regex)
+        form.addRow("case_dir_levels", self.watch_case_dir_levels)
+        form.addRow("poll_sec", self.watch_poll_sec)
+        hint = QLabel(
+            "Used by python -m winstonlutz watch (Windows service via NSSM), not the GUI. "
+            "file_patterns are filename globs (one per line); default RE.*.dcm. "
+            "recursive watches machine/case subfolders. "
+            "The case folder is that many parents above the trigger file (1 = same folder as the file). "
+            "case_folder_regex must match that folder name; leave empty to accept any name. "
+            "Machine name is still the parent of the case folder (Edge/26-09-23_... → Edge). "
+            "Analysis settings come from MACHINES."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b;")
+        form.addRow("", hint)
+        box = QGroupBox("Watcher (Windows service)")
+        box.setLayout(form)
+        return box
+
+    def _postprocess_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        form.addRow("", self.df_enabled)
+        form.addRow("backend_url", self.df_backend)
+        form.addRow("", self.df_verify_ssl)
+        form.addRow("", self.df_dry_run)
+        form.addRow("", self.df_zip)
+        form.addRow("", self.df_pdf)
+        form.addRow("", self.df_resubmit)
+        form.addRow("timeout_sec", self.df_timeout)
+        hint = QLabel(
+            "After analysis, winstonlutz can push the case to DocuForms2 "
+            "(same payload as _ref_projects/docuforms_import/scripts/upload_igrt). "
+            "Set each machine’s docuforms2_form_id (sb_edge_mlc_wl, sb_edge_cone_wl, "
+            "sb_truebeam_mlc_wl). Empty form id skips that machine. "
+            "Successful uploads write .docuforms2_igrt.json in the case folder so the "
+            "watcher does not submit twice. Cases are not moved. "
+            "More PostProcessing types can be added later in JSON."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b;")
+        form.addRow("", hint)
+        box = QGroupBox("DocuForms2 IGRT")
+        box.setLayout(form)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _identity_group(self) -> QGroupBox:
+        form = QFormLayout()
+        form.addRow("user_id_method", self.user_id_method)
+        form.addRow("OS user (this PC)", self.os_user_preview)
+        form.addRow("issuer", self.oidc_issuer)
+        form.addRow("client_id", self.oidc_client_id)
+        form.addRow("scopes", self.oidc_scopes)
+        form.addRow("redirect_uri", self.oidc_redirect)
+        form.addRow("registration_url", self.oidc_registration)
+        form.addRow("", self.oidc_register_btn)
+        hint = QLabel(
+            "None: no user id. OSUser: Windows / Linux / macOS login (no extra prompt). "
+            "OIDC is the protocol; Keycloak is the issuer. No separate Keycloak method. "
+            "At startup the app opens a Sign in window, then your browser (Authorization Code + PKCE). "
+            "Create a dedicated public client (winstonlutz), not account-console. "
+            "Add redirect_uri exactly to Valid redirect URIs; use 127.0.0.1, not localhost "
+            "(http://127.0.0.1:17843/callback). Standard flow + PKCE S256. "
+            "registration_url is the Account Console ({issuer}/account/), not "
+            "/protocol/openid-connect/registrations. Profiles go under _users."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b;")
+        form.addRow("", hint)
+        box = QGroupBox("Identity")
+        box.setLayout(form)
+        self._sync_identity_ui()
+        return box
+
+    def _open_oidc_registration(self) -> None:
+        issuer = self.oidc_issuer.text().strip() or DEFAULT_OIDC_ISSUER
+        url = coerce_registration_url(self.oidc_registration.text(), issuer)
+        self.oidc_registration.setText(url)
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _sync_identity_ui(self, _text: str = "") -> None:
+        method = self.user_id_method.currentText() or USER_ID_NONE
+        oidc_on = method == USER_ID_OIDC
+        for widget in (
+            self.oidc_issuer,
+            self.oidc_client_id,
+            self.oidc_scopes,
+            self.oidc_redirect,
+            self.oidc_registration,
+            self.oidc_register_btn,
+        ):
+            widget.setEnabled(oidc_on)
+        if method == USER_ID_OSUSER:
+            self.os_user_preview.setPlainText(format_os_user_preview())
+        elif method == USER_ID_OIDC:
+            issuer = self.oidc_issuer.text().strip() or DEFAULT_OIDC_ISSUER
+            self.os_user_preview.setPlainText(
+                "At startup you will get a Sign in window, then Keycloak in the browser.\n"
+                f"issuer: {issuer}\n"
+                f"client_id: {self.oidc_client_id.text().strip() or DEFAULT_OIDC_CLIENT_ID}\n"
+                f"redirect_uri: {self.oidc_redirect.text().strip() or DEFAULT_OIDC_REDIRECT_URI}\n"
+                "That redirect_uri must be allowed on the Keycloak client."
+            )
+        else:
+            self.os_user_preview.setPlainText("No user id (clinic-wide settings only).")
+
+    def _notify_group(self, title: str, form: QFormLayout) -> QGroupBox:
+        box = QGroupBox(title)
+        box.setLayout(form)
+        return box
+
+    def _email_form(self) -> QFormLayout:
+        form = QFormLayout()
+        form.addRow("error_email_to", self.error_email_to)
+        form.addRow("event_email_to", self.event_email_to)
+        form.addRow("new_case_email_to", self.notify_new_case_email_to)
+        form.addRow("email_from", self.email_from)
+        form.addRow("email_domain", self.email_domain)
+        form.addRow("email_host_address", self.email_host)
+        form.addRow("email_host_port", self.email_port)
+        form.addRow("", self.email_ssl)
+        hint = QLabel(
+            "One address per line (JSON arrays). Leave a list empty to skip that mail. "
+            "error_email_to: crashes and analysis failures. "
+            "event_email_to: watcher start/stop. "
+            "new_case_email_to: full IGRT report after watcher analysis (clinic-wide; "
+            "a machine may add extra addresses). SMTP also needs email_from and email_host_address."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b;")
+        form.addRow("", hint)
+        form.addRow("", self._notify_test_button("Send test email", self._test_email))
+        return form
+
+    def _webhook_form(self, edit: QLineEdit, hint_text: str, channel: str) -> QFormLayout:
+        form = QFormLayout()
+        form.addRow("webhook_url", edit)
+        hint = QLabel(hint_text)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b;")
+        form.addRow("", hint)
+        label = CHAT_CHANNEL_LABELS.get(channel, channel)
+        form.addRow(
+            "",
+            self._notify_test_button(
+                f"Send test to {label}",
+                partial(self._test_chat, channel),
+            ),
+        )
+        return form
+
+    def _notify_test_button(self, text: str, slot) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
+        btn.clicked.connect(lambda *_args: self._run_notify_test(text, slot, btn))
+        return btn
+
+    def _run_notify_test(self, title: str, work, button: QPushButton) -> None:
+        button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            work()
+            ok, message = True, "Test message sent."
+        except Exception as exc:
+            ok, message = False, str(exc) or "Send failed."
+        finally:
+            QApplication.restoreOverrideCursor()
+            button.setEnabled(True)
+        if ok:
+            QMessageBox.information(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
+    def _test_email(self) -> None:
+        send_test_email(self.collected())
+
+    def _test_chat(self, channel: str) -> None:
+        send_test_chat(channel, self.collected())
+
+    def _notifications_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.addWidget(self._notify_group("Email", self._email_form()))
+        layout.addWidget(
+            self._notify_group(
+                "Google Chat",
+                self._webhook_form(
+                    self.google_chat_url,
+                    "Incoming webhook for a Google Chat space. Empty = off. "
+                    "Errors are posted as text.",
+                    "google_chat",
+                ),
+            )
+        )
+        layout.addWidget(
+            self._notify_group(
+                "Slack",
+                self._webhook_form(
+                    self.slack_url,
+                    "Incoming webhook for a Slack channel. Empty = off.",
+                    "slack",
+                ),
+            )
+        )
+        layout.addWidget(
+            self._notify_group(
+                "Microsoft Teams",
+                self._webhook_form(
+                    self.teams_url,
+                    "Incoming webhook (Workflows or Office 365 connector). Empty = off.",
+                    "microsoft_teams",
+                ),
+            )
+        )
+        layout.addWidget(
+            self._notify_group(
+                "Discord",
+                self._webhook_form(
+                    self.discord_url,
+                    "Channel webhook. Empty = off.",
+                    "discord",
+                ),
+            )
+        )
+        layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
         return page
 
     def _machines_page(self) -> QWidget:
@@ -523,12 +925,75 @@ class SettingsDialog(QDialog):
         data = dict(self._original)
         data[INSTITUTION_KEY] = self.institution.text().strip()
         data[RUN_MODE_KEY] = self.run_mode.currentText() or RUN_MODE_CLINIC
-        data[ERROR_EMAIL_TO_KEY] = self.error_email_to.text().strip()
-        data["email_from"] = self.email_from.text().strip()
-        data["email_domain"] = self.email_domain.text().strip()
-        data["email_host_address"] = self.email_host.text().strip()
-        data["email_host_port"] = self.email_port.value()
-        data["enable_ssl"] = self.email_ssl.isChecked()
+        ident = identity_block(self._original)
+        ident["user_id_method"] = self.user_id_method.currentText() or USER_ID_NONE
+        ident["oidc"] = {
+            "issuer": self.oidc_issuer.text().strip() or DEFAULT_OIDC_ISSUER,
+            "client_id": self.oidc_client_id.text().strip() or DEFAULT_OIDC_CLIENT_ID,
+            "scopes": self.oidc_scopes.text().strip() or DEFAULT_OIDC_SCOPES,
+            "redirect_uri": self.oidc_redirect.text().strip() or DEFAULT_OIDC_REDIRECT_URI,
+            "registration_url": coerce_registration_url(
+                self.oidc_registration.text().strip(),
+                self.oidc_issuer.text().strip() or DEFAULT_OIDC_ISSUER,
+            ),
+        }
+        data[IDENTITY_KEY] = ident
+        data[WATCHER_KEY] = {
+            "watch_path": self.watch_path.text().strip(),
+            "data_root": self.watch_data_root.text().strip(),
+            "recursive": self.watch_recursive.isChecked(),
+            "file_patterns": normalize_file_patterns(self.watch_file_patterns.toPlainText()),
+            "case_folder_regex": self.watch_case_folder_regex.text().strip(),
+            "case_dir_levels": self.watch_case_dir_levels.value(),
+            "poll_sec": self.watch_poll_sec.value(),
+        }
+        email_to = error_email_to_list(self.error_email_to.toPlainText())
+        event_to = error_email_to_list(self.event_email_to.toPlainText())
+        new_case_to = error_email_to_list(self.notify_new_case_email_to.toPlainText())
+        email_from = self.email_from.text().strip()
+        email_domain = self.email_domain.text().strip()
+        email_host = self.email_host.text().strip()
+        email_port = self.email_port.value()
+        email_ssl = self.email_ssl.isChecked()
+        enc = str(self._original.get("email_from_enc_pw") or "")
+        notes_in = self._original.get(NOTIFICATIONS_KEY)
+        if isinstance(notes_in, dict):
+            nested_email = notes_in.get("email")
+            if isinstance(nested_email, dict):
+                enc = str(nested_email.get("email_from_enc_pw") or enc)
+        for key in TOP_LEVEL_EMAIL_KEYS:
+            data.pop(key, None)
+        data[NOTIFICATIONS_KEY] = {
+            "email": {
+                ERROR_EMAIL_TO_KEY: email_to,
+                EVENT_EMAIL_TO_KEY: event_to,
+                NEW_CASE_EMAIL_TO_KEY: new_case_to,
+                "email_from": email_from,
+                "email_domain": email_domain,
+                "email_host_address": email_host,
+                "email_host_port": email_port,
+                "enable_ssl": email_ssl,
+                "email_from_enc_pw": enc,
+            },
+            "google_chat": {"webhook_url": self.google_chat_url.text().strip()},
+            "slack": {"webhook_url": self.slack_url.text().strip()},
+            "microsoft_teams": {"webhook_url": self.teams_url.text().strip()},
+            "discord": {"webhook_url": self.discord_url.text().strip()},
+        }
+        df_step = {
+            **default_docuforms2_igrt_step(),
+            "enabled": self.df_enabled.isChecked(),
+            "backend_url": self.df_backend.text().strip(),
+            "verify_ssl": self.df_verify_ssl.isChecked(),
+            "dry_run": self.df_dry_run.isChecked(),
+            "attach_dcm_zip": self.df_zip.isChecked(),
+            "attach_pdf": self.df_pdf.isChecked(),
+            "resubmit": self.df_resubmit.isChecked(),
+            "timeout_sec": self.df_timeout.value(),
+        }
+        data[POST_PROCESSING_KEY] = upsert_post_step(
+            post_processing_steps(self._original), df_step
+        )
         data[MACHINES_KEY] = copy.deepcopy(self._machines)
         return data
 
@@ -546,6 +1011,8 @@ class SettingsDialog(QDialog):
             return
         data = self.collected()
         save_gui_settings(data)
+        if get_user_id_method(data) == USER_ID_OSUSER:
+            upsert_os_user_profile()
         self._original = copy.deepcopy(data)
         self.did_save = True
         self._save_window_state()

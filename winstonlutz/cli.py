@@ -10,7 +10,7 @@ from .analysis import analyze_image
 from .logutil import configure_logging
 from .pipeline import run_case
 from .validate import validate_sample_data
-from .watcher import watch
+from .watcher import WatchPathUnavailable, watch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,9 +33,17 @@ def main(argv: list[str] | None = None) -> int:
     p_case.add_argument("--email", action="store_true")
     p_case.add_argument("--preprocess", action="store_true")
 
-    p_watch = sub.add_parser("watch", help="watch a transfer folder for RE.*.dcm")
-    p_watch.add_argument("--watch-path", required=True)
-    p_watch.add_argument("--data-root", required=True)
+    p_watch = sub.add_parser("watch", help="watch a transfer folder for trigger files (C# service replacement)")
+    p_watch.add_argument(
+        "--watch-path",
+        default="",
+        help="transfer share (default: Watcher.watch_path in settings JSON)",
+    )
+    p_watch.add_argument(
+        "--data-root",
+        default="",
+        help="WinstonLutz data tree (default: Watcher.data_root in settings JSON)",
+    )
 
     p_val = sub.add_parser("validate-golden", help="compare analysis to sample_data result.txt")
     p_val.add_argument("sample_data", nargs="?", default="sample_data")
@@ -77,7 +85,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if items else 1
 
     if args.cmd == "watch":
-        watch(args.watch_path, args.data_root)
+        from .app_settings import watcher_settings
+
+        cfg = watcher_settings()
+        watch_path = (args.watch_path or cfg.get("watch_path") or "").strip()
+        data_root = (args.data_root or cfg.get("data_root") or "").strip()
+        if not watch_path or not data_root:
+            print(
+                "watch needs --watch-path and --data-root, or Watcher.watch_path and "
+                "Watcher.data_root in winstonlutz.gui.settings.json",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            watch(watch_path, data_root, poll_sec=cfg.get("poll_sec"), watcher=cfg)
+        except WatchPathUnavailable as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("Watcher stopped.", file=sys.stderr)
+            return 0
         return 0
 
     if args.cmd == "validate-golden":

@@ -1,4 +1,4 @@
-"""GUI settings in winstonlutz.gui.settings.json next to the executable.
+"""App settings in settings.json next to the executable.
 
 Machine list, data folders, BB methods, and tolerance live under MACHINES.
 Clinic SMTP lives under Notifications.email. Window/level and view style stay in QSettings.
@@ -11,7 +11,8 @@ import os
 import sys
 from pathlib import Path
 
-SETTINGS_NAME = "winstonlutz.gui.settings.json"
+SETTINGS_NAME = "settings.json"
+LEGACY_SETTINGS_NAME = "winstonlutz.gui.settings.json"
 MACHINES_KEY = "MACHINES"
 INSTITUTION_KEY = "Institution"
 RUN_MODE_KEY = "RunMode"
@@ -41,6 +42,25 @@ DEFAULT_WATCH_FILE_PATTERNS = ["RE.*.dcm"]
 DEFAULT_WATCH_RECURSIVE = True
 DEFAULT_WATCH_CASE_DIR_LEVELS = 1
 DEFAULT_WATCH_POLL_SEC = 10.0
+DEFAULT_WATCH_DISK_SCAN = True
+DEFAULT_WATCH_DISK_SCAN_SEC = 60.0
+DEFAULT_WATCH_ARCHIVE = True
+DEFAULT_WATCH_ARCHIVE_AGE_DAYS = 7
+DEFAULT_WATCH_ARCHIVE_AT = "01:00"
+# Canonical Watcher JSON keys, with older names still accepted when reading.
+WATCHER_SETTING_ALIASES = {
+    "winstonlutz_data_root": ("data_root",),
+    "watch_subfolders": ("recursive",),
+    "new_case_file_patterns": ("file_patterns", "file_pattern"),
+    "case_folder_name_regex": ("case_folder_regex",),
+    "machine_to_case_dir_levels": ("case_dir_levels",),
+    "queued_case_poll_sec": ("poll_sec",),
+    "disk_scan_for_new_case_detection": ("disk_scan",),
+    "disk_scan_for_new_case_detection_sec": ("disk_scan_sec",),
+    "archive_old_cases": ("archive",),
+    "archive_cases_older_than_days": ("archive_age_days",),
+    "archive_old_cases_at": ("archive_at",),
+}
 
 
 def app_dir() -> Path:
@@ -61,11 +81,79 @@ def app_dir() -> Path:
     return root
 
 
-def user_config_path() -> Path:
+def user_config_path(*, writing: bool = False) -> Path:
+    """``settings.json`` next to the exe (or project root from source).
+
+    ``WINSTONLUTZ_APP_CONFIG`` overrides the path. An older
+    ``winstonlutz.gui.settings.json`` in the same folder is still read if
+    ``settings.json`` is missing. Saves always go to ``settings.json``.
+    """
     override = os.environ.get("WINSTONLUTZ_APP_CONFIG", "").strip()
     if override:
         return Path(override)
-    return app_dir() / SETTINGS_NAME
+    folder = app_dir()
+    canonical = folder / SETTINGS_NAME
+    if writing or canonical.is_file():
+        return canonical
+    legacy = folder / LEGACY_SETTINGS_NAME
+    if legacy.is_file():
+        return legacy
+    return canonical
+
+
+def strip_jsonc(text: str) -> str:
+    """Remove ``//`` and ``/* */`` comments; leave JSON string contents unchanged."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    in_line = False
+    in_block = False
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_line:
+            if ch in "\r\n":
+                in_line = False
+                out.append(ch)
+            i += 1
+            continue
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+                i += 2
+                continue
+            if ch in "\r\n":
+                out.append(ch)
+            i += 1
+            continue
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def load_gui_settings() -> dict:
@@ -73,7 +161,7 @@ def load_gui_settings() -> dict:
     if not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(strip_jsonc(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
@@ -83,7 +171,7 @@ def load_gui_settings() -> dict:
 
 
 def save_gui_settings(data: dict) -> None:
-    path = user_config_path()
+    path = user_config_path(writing=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -151,37 +239,88 @@ def normalize_file_patterns(value) -> list[str]:
     return out or list(DEFAULT_WATCH_FILE_PATTERNS)
 
 
+def promote_watcher_aliases(raw: dict | None) -> dict:
+    """Copy Watcher settings and fill canonical keys from older aliases."""
+    out = dict(raw) if isinstance(raw, dict) else {}
+    for new_key, old_keys in WATCHER_SETTING_ALIASES.items():
+        if new_key in out:
+            continue
+        for old_key in old_keys:
+            if old_key in out:
+                out[new_key] = out[old_key]
+                break
+    return out
+
+
 def watcher_settings(data: dict | None = None) -> dict:
     """Paths and match rules for ``winstonlutz watch``."""
     settings = data if data is not None else load_gui_settings()
     block = (settings or {}).get(WATCHER_KEY)
-    raw = block if isinstance(block, dict) else {}
-    if "case_folder_regex" in raw:
-        case_regex = str(raw.get("case_folder_regex") or "")
+    raw = promote_watcher_aliases(block if isinstance(block, dict) else {})
+    if "case_folder_name_regex" in raw:
+        case_regex = str(raw.get("case_folder_name_regex") or "")
     else:
         case_regex = DEFAULT_CASE_FOLDER_REGEX
     try:
-        levels = int(raw.get("case_dir_levels", DEFAULT_WATCH_CASE_DIR_LEVELS))
+        levels = int(raw.get("machine_to_case_dir_levels", DEFAULT_WATCH_CASE_DIR_LEVELS))
     except (TypeError, ValueError):
         levels = DEFAULT_WATCH_CASE_DIR_LEVELS
     levels = max(1, min(levels, 8))
     try:
-        poll = float(raw.get("poll_sec", DEFAULT_WATCH_POLL_SEC))
+        poll = float(raw.get("queued_case_poll_sec", DEFAULT_WATCH_POLL_SEC))
     except (TypeError, ValueError):
         poll = DEFAULT_WATCH_POLL_SEC
     if poll <= 0:
         poll = DEFAULT_WATCH_POLL_SEC
+    try:
+        disk_scan_sec = float(
+            raw.get("disk_scan_for_new_case_detection_sec", DEFAULT_WATCH_DISK_SCAN_SEC)
+        )
+    except (TypeError, ValueError):
+        disk_scan_sec = DEFAULT_WATCH_DISK_SCAN_SEC
+    if disk_scan_sec <= 0:
+        disk_scan_sec = DEFAULT_WATCH_DISK_SCAN_SEC
+    try:
+        archive_age_days = int(
+            raw.get("archive_cases_older_than_days", DEFAULT_WATCH_ARCHIVE_AGE_DAYS)
+        )
+    except (TypeError, ValueError):
+        archive_age_days = DEFAULT_WATCH_ARCHIVE_AGE_DAYS
+    if archive_age_days < 1:
+        archive_age_days = DEFAULT_WATCH_ARCHIVE_AGE_DAYS
     return {
         "watch_path": str(raw.get("watch_path") or "").strip(),
-        "data_root": str(raw.get("data_root") or "").strip(),
-        "recursive": _as_bool(raw.get("recursive"), DEFAULT_WATCH_RECURSIVE),
-        "file_patterns": normalize_file_patterns(
-            raw.get("file_patterns", raw.get("file_pattern"))
+        "winstonlutz_data_root": str(raw.get("winstonlutz_data_root") or "").strip(),
+        "watch_subfolders": _as_bool(raw.get("watch_subfolders"), DEFAULT_WATCH_RECURSIVE),
+        "new_case_file_patterns": normalize_file_patterns(
+            raw.get("new_case_file_patterns")
         ),
-        "case_folder_regex": case_regex,
-        "case_dir_levels": levels,
-        "poll_sec": poll,
+        "case_folder_name_regex": case_regex,
+        "machine_to_case_dir_levels": levels,
+        "queued_case_poll_sec": poll,
+        "disk_scan_for_new_case_detection": _as_bool(
+            raw.get("disk_scan_for_new_case_detection"), DEFAULT_WATCH_DISK_SCAN
+        ),
+        "disk_scan_for_new_case_detection_sec": disk_scan_sec,
+        "archive_old_cases": _as_bool(raw.get("archive_old_cases"), DEFAULT_WATCH_ARCHIVE),
+        "archive_cases_older_than_days": archive_age_days,
+        "archive_old_cases_at": _normalize_hhmm(
+            raw.get("archive_old_cases_at"), DEFAULT_WATCH_ARCHIVE_AT
+        ),
     }
+
+
+def _normalize_hhmm(value, default: str) -> str:
+    text = str(value or "").strip() or default
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+    except (TypeError, ValueError, IndexError):
+        return default
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default
+    return f"{hour:02d}:{minute:02d}"
 
 
 def default_docuforms2_igrt_step() -> dict:
@@ -193,10 +332,97 @@ def default_docuforms2_igrt_step() -> dict:
         "verify_ssl": False,
         "dry_run": False,
         "attach_dcm_zip": True,
-        "attach_pdf": False,
+        "attach_pdf": True,
         "resubmit": False,
         "timeout_sec": 300,
+        "form_ids": [],
+        "email_success_event_to": [],
+        "email_failure_event_to": [],
     }
+
+
+def normalize_form_ids(value) -> list[dict]:
+    """Normalize a machine→form_id list to ``[{"machine": name, "form_id": id}, ...]``."""
+    items: list = []
+    if isinstance(value, dict):
+        if "machine" in value or "form_id" in value or "NAME" in value:
+            items = [value]
+        else:
+            items = [{"machine": key, "form_id": val} for key, val in value.items()]
+    elif isinstance(value, list):
+        items = value
+    out: list[dict] = []
+    for item in items:
+        machine = ""
+        form_id = ""
+        if isinstance(item, dict):
+            machine = str(item.get("machine") or item.get("NAME") or item.get("name") or "").strip()
+            form_id = str(item.get("form_id") or item.get("docuforms2_form_id") or "").strip()
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            machine = str(item[0] or "").strip()
+            form_id = str(item[1] or "").strip()
+        if not machine or not form_id:
+            continue
+        key = machine.lower()
+        out = [row for row in out if row["machine"].lower() != key]
+        out.append({"machine": machine, "form_id": form_id})
+    return out
+
+
+def form_ids_from_step(step: dict | None) -> list[dict]:
+    step = step or {}
+    return normalize_form_ids(step.get("form_ids") or step.get("form_id_map"))
+
+
+def form_ids_from_machines(machines) -> list[dict]:
+    rows: list[dict] = []
+    if not isinstance(machines, list):
+        return rows
+    for machine in machines:
+        if not isinstance(machine, dict):
+            continue
+        name = str(machine.get("NAME") or "").strip()
+        form_id = str(machine.get("docuforms2_form_id") or "").strip()
+        if name and form_id:
+            rows.append({"machine": name, "form_id": form_id})
+    return normalize_form_ids(rows)
+
+
+def form_id_for_machine(step: dict | None, machine_cfg: dict | None) -> str:
+    """DocuForms2 form id for this machine from PostProcessing.form_ids, else legacy machine key."""
+    name = str((machine_cfg or {}).get("NAME") or "").strip()
+    for row in form_ids_from_step(step):
+        if row["machine"].lower() == name.lower():
+            return row["form_id"]
+    return str((machine_cfg or {}).get("docuforms2_form_id") or "").strip()
+
+
+def format_form_ids(value) -> str:
+    return "\n".join(
+        f"{row['machine']} = {row['form_id']}" for row in normalize_form_ids(value)
+    )
+
+
+def parse_form_ids_text(text) -> list[dict]:
+    rows: list[dict] = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            left, right = line.split("=", 1)
+        elif ":" in line:
+            left, right = line.split(":", 1)
+        else:
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            left, right = parts
+        machine = left.strip()
+        form_id = right.strip()
+        if machine and form_id:
+            rows.append({"machine": machine, "form_id": form_id})
+    return normalize_form_ids(rows)
 
 
 def post_processing_steps(data: dict | None = None) -> list[dict]:
@@ -330,6 +556,30 @@ def find_machine_by_name(name: str) -> dict | None:
     return None
 
 
+def machine_configured_roots(machine: dict | None) -> list[Path]:
+    """WATCH_FOLDER then DATA_FOLDER as configured (paths may not exist)."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    if not isinstance(machine, dict):
+        return roots
+    for key in ("WATCH_FOLDER", "DATA_FOLDER"):
+        text = str(machine.get(key) or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        ident = str(path).replace("\\", "/").rstrip("/").lower()
+        if ident in seen:
+            continue
+        seen.add(ident)
+        roots.append(path)
+    return roots
+
+
+def machine_case_roots(machine: dict | None) -> list[Path]:
+    """Existing WATCH_FOLDER then DATA_FOLDER directories for Open Case."""
+    return [path for path in machine_configured_roots(machine) if path.is_dir()]
+
+
 def find_machine_for_folder(folder: str | Path) -> dict | None:
     """Match a case or machine folder to a MACHINES entry."""
     folder = Path(folder)
@@ -338,15 +588,13 @@ def find_machine_for_folder(folder: str | Path) -> dict | None:
     except OSError:
         pass
     for machine in get_machines():
-        data = str(machine.get("DATA_FOLDER") or "").strip()
-        if data:
-            data_path = Path(data).expanduser()
+        for root in machine_configured_roots(machine):
             try:
-                data_path = data_path.resolve()
+                root_path = root.resolve()
             except OSError:
-                data_path = Path(data)
+                root_path = root
             try:
-                folder.relative_to(data_path)
+                folder.relative_to(root_path)
                 return machine
             except ValueError:
                 pass
@@ -414,13 +662,13 @@ def default_machine(name: str = "New machine") -> dict:
     """Template for a new MACHINES entry (documented analysis defaults)."""
     return {
         "NAME": name,
+        "WATCH_FOLDER": "",
         "DATA_FOLDER": "",
         "REPORT_TEMPLATE_FILE_PATH": "",
         "CASE_FOLDER_NAME_REGEX": DEFAULT_CASE_FOLDER_REGEX,
         "WL_pass_tolerance": 1.0,
         "record_csv_file": "",
         "new_case_email_to": [],
-        "docuforms2_form_id": "",
         "MV_bb_search_method": "ConnectedComponent",
         "kV_bb_search_method": "ConnectedComponent",
         "MV_field_search_method": "Otsu",

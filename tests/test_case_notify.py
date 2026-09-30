@@ -9,7 +9,7 @@ def test_new_case_scan_seeds_then_notifies(tmp_path, monkeypatch):
     from winstonlutz import identity as ident
 
     ident._os_facts_cache = None
-    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "winstonlutz.gui.settings.json"))
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "settings.json"))
     monkeypatch.setenv("WINSTONLUTZ_USERS_DIR", str(tmp_path / "_users"))
 
     data = tmp_path / "Edge" / "Data"

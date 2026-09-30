@@ -13,7 +13,7 @@ def test_identity_defaults_and_os_user(tmp_path, monkeypatch):
     )
 
     ident._os_facts_cache = None
-    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "winstonlutz.gui.settings.json"))
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "settings.json"))
     monkeypatch.setenv("WINSTONLUTZ_USERS_DIR", str(tmp_path / "_users"))
 
     assert get_user_id_method({}) == USER_ID_NONE
@@ -103,7 +103,7 @@ def test_user_profile_machines_and_subscribers(tmp_path, monkeypatch):
     )
 
     ident._os_facts_cache = None
-    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "winstonlutz.gui.settings.json"))
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(tmp_path / "settings.json"))
     monkeypatch.setenv("WINSTONLUTZ_USERS_DIR", str(tmp_path / "_users"))
 
     assert looks_like_email("pat@hospital.edu")

@@ -1,6 +1,11 @@
-"""PyInstaller entry for the Winston-Lutz GUI."""
+"""PyInstaller entry: GUI with no args; CLI subcommands otherwise (e.g. ``watch``)."""
 
+import sys
+
+from winstonlutz.cli import main
 from winstonlutz.gui import run_app
 
 if __name__ == "__main__":
-    raise SystemExit(run_app())
+    if len(sys.argv) <= 1:
+        raise SystemExit(run_app())
+    raise SystemExit(main())

@@ -110,8 +110,9 @@ def configure_logging(*, verbose: bool = False, console: bool | None = None) -> 
     if console is None:
         frozen = bool(getattr(sys, "frozen", False))
         console = (not frozen) or sys.stderr.isatty()
-    if console and not _has_stream_handler(root):
-        stream = logging.StreamHandler()
+    stream_obj = sys.stderr or sys.stdout
+    if console and stream_obj is not None and not _has_stream_handler(root):
+        stream = logging.StreamHandler(stream_obj)
         stream.setFormatter(formatter)
         stream.setLevel(level)
         root.addHandler(stream)

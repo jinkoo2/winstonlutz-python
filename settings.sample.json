@@ -1,3 +1,5 @@
+// Sample Winston-Lutz settings (JSONC: // and /* */ comments are allowed).
+// Copy to settings.json next to WinstonLutz.exe. Saving Settings in the GUI drops comments.
 {
   "Institution": "Your Institution",
   "RunMode": "Clinic",
@@ -12,13 +14,18 @@
     }
   },
   "Watcher": {
-    "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT",
-    "data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
-    "recursive": true,
-    "file_patterns": ["RE.*.dcm"],
-    "case_folder_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
-    "case_dir_levels": 1,
-    "poll_sec": 10
+    "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT", // Aria transfer share
+    "winstonlutz_data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
+    "watch_subfolders": true,
+    "new_case_file_patterns": ["RE.*.dcm"], // globs that queue a new case
+    "case_folder_name_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
+    "machine_to_case_dir_levels": 1, // parents above the trigger file to the case folder
+    "queued_case_poll_sec": 10,
+    "disk_scan_for_new_case_detection": true, // UNC backup if watchdog misses a create
+    "disk_scan_for_new_case_detection_sec": 60,
+    "archive_old_cases": true, // WATCH_FOLDER -> DATA_FOLDER
+    "archive_cases_older_than_days": 7,
+    "archive_old_cases_at": "01:00" // local time
   },
   "Notifications": {
     "email": {
@@ -45,19 +52,25 @@
       "verify_ssl": false,
       "dry_run": false,
       "attach_dcm_zip": true,
-      "attach_pdf": false,
+      "attach_pdf": true,
       "resubmit": false,
-      "timeout_sec": 300
+      "timeout_sec": 300,
+      "form_ids": [
+        {"machine": "Edge", "form_id": "sb_edge_mlc_wl"}
+      ],
+      "email_success_event_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+      "email_failure_event_to": ["jinkoo.kim@stonybrookmedicine.edu"]
     }
   ],
   "MACHINES": [
+    // WATCH_FOLDER = live transfer cases; DATA_FOLDER = archive
     {
       "NAME": "Edge",
+      "WATCH_FOLDER": "",
       "DATA_FOLDER": "sample_data/Edge/Data",
       "REPORT_TEMPLATE_FILE_PATH": "sample_data/Edge/ReportTmplt/full/report1.tmpl.html",
       "CASE_FOLDER_NAME_REGEX": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
       "WL_pass_tolerance": 1.0,
-      "docuforms2_form_id": "sb_edge_mlc_wl",
       "record_csv_file": "",
       "MV_bb_search_method": "ConnectedComponent",
       "kV_bb_search_method": "ConnectedComponent",

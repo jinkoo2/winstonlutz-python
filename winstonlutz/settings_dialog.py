@@ -1,4 +1,4 @@
-"""Tabbed Settings dialog: General, Machines, and Notifications."""
+"""Tabbed Settings dialog: General, Identity, Machines, Notifications, Watcher."""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ import copy
 from functools import partial
 from pathlib import Path
 
-from PyQt5.QtCore import QSettings, QTimer, QUrl, Qt
+from PyQt5.QtCore import QSettings, QTimer, QUrl, Qt, QTime
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -26,9 +27,11 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTabWidget,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -59,8 +62,25 @@ from .identity import (
     upsert_os_user_profile,
 )
 
+from .watch_service import (
+    FROZEN_APP_PARAMETERS,
+    SOURCE_APP_PARAMETERS,
+    WatchServicePlan,
+    default_app_parameters,
+    default_plan,
+    format_nssm_commands,
+    install_watch_service,
+    is_admin,
+    is_windows,
+)
 from .app_settings import (
     BB_SEARCH_METHODS,
+    DEFAULT_WATCH_ARCHIVE,
+    DEFAULT_WATCH_ARCHIVE_AGE_DAYS,
+    DEFAULT_WATCH_ARCHIVE_AT,
+    DEFAULT_WATCH_DISK_SCAN,
+    DEFAULT_WATCH_DISK_SCAN_SEC,
+    DEFAULT_WATCH_POLL_SEC,
     DOCUFORMS2_IGRT_TYPE,
     ERROR_EMAIL_TO_KEY,
     EVENT_EMAIL_TO_KEY,
@@ -82,12 +102,16 @@ from .app_settings import (
     email_settings_block,
     find_post_step,
     format_csv_numbers,
+    format_form_ids,
+    form_ids_from_machines,
+    form_ids_from_step,
     get_institution,
     get_machines,
     get_run_mode,
     load_gui_settings,
     normalize_file_patterns,
     parse_csv_numbers,
+    parse_form_ids_text,
     parse_int_list,
     post_processing_steps,
     save_gui_settings,
@@ -115,6 +139,26 @@ def _browse_start(text: str) -> str:
     return ""
 
 
+def _hint_label(text: str) -> QLabel:
+    """Wrapping note that does not force the dialog to the full line width."""
+    hint = QLabel(text)
+    hint.setWordWrap(True)
+    hint.setStyleSheet("color: #64748b;")
+    hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    return hint
+
+
+def _scroll_page(inner: QWidget) -> QWidget:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(inner)
+    page = QWidget()
+    outer = QVBoxLayout(page)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.addWidget(scroll)
+    return page
+
+
 class MachineForm(QWidget):
     """Editor for one MACHINES JSON object."""
 
@@ -125,6 +169,7 @@ class MachineForm(QWidget):
         self.name_changed = None  # optional callable(str)
 
         self.name = QLineEdit()
+        self.watch_folder = QLineEdit()
         self.data_folder = QLineEdit()
         self.report_template = QLineEdit()
         self.case_regex = QLineEdit()
@@ -133,8 +178,6 @@ class MachineForm(QWidget):
         self.new_case_email_to.setTabChangesFocus(True)
         self.new_case_email_to.setFixedHeight(72)
         self.new_case_email_to.setPlaceholderText("optional extra addresses for this machine")
-        self.docuforms2_form_id = QLineEdit()
-        self.docuforms2_form_id.setPlaceholderText("sb_edge_mlc_wl")
         self.plan_file = QLineEdit()
         self.ignore_beams = QLineEdit()
         self.all_ri_required = QCheckBox("Require every plan beam (except IGNORE_BEAMS)")
@@ -214,12 +257,12 @@ class MachineForm(QWidget):
     def _identity_form(self) -> QFormLayout:
         form = QFormLayout()
         form.addRow("NAME", self.name)
+        form.addRow("WATCH_FOLDER", self._path_row(self.watch_folder, "dir"))
         form.addRow("DATA_FOLDER", self._path_row(self.data_folder, "dir"))
         form.addRow("REPORT_TEMPLATE_FILE_PATH", self._path_row(self.report_template, "html"))
         form.addRow("CASE_FOLDER_NAME_REGEX", self.case_regex)
         form.addRow("record_csv_file", self.record_csv)
         form.addRow("new_case_email_to", self.new_case_email_to)
-        form.addRow("docuforms2_form_id", self.docuforms2_form_id)
         return form
 
     def _plan_form(self) -> QFormLayout:
@@ -272,12 +315,12 @@ class MachineForm(QWidget):
         self._source = dict(machine or default_machine())
         m = self._source
         self.name.setText(str(m.get("NAME") or ""))
+        self.watch_folder.setText(str(m.get("WATCH_FOLDER") or ""))
         self.data_folder.setText(str(m.get("DATA_FOLDER") or ""))
         self.report_template.setText(str(m.get("REPORT_TEMPLATE_FILE_PATH") or ""))
         self.case_regex.setText(str(m.get("CASE_FOLDER_NAME_REGEX") or ""))
         self.record_csv.setText(str(m.get("record_csv_file") or ""))
         self.new_case_email_to.setPlainText(format_error_email_to(m.get("new_case_email_to")))
-        self.docuforms2_form_id.setText(str(m.get("docuforms2_form_id") or ""))
         self.plan_file.setText(str(m.get("DICOM_PLAN_FILE") or ""))
         self.ignore_beams.setText(format_csv_numbers(m.get("IGNORE_BEAMS")))
         self.all_ri_required.setChecked(_as_bool(m.get("ALL_RI_IMAGE_REQUIRED")))
@@ -320,12 +363,13 @@ class MachineForm(QWidget):
     def collect_machine(self) -> dict:
         data = dict(self._source)
         data["NAME"] = self.name.text().strip()
+        data["WATCH_FOLDER"] = self.watch_folder.text().strip()
         data["DATA_FOLDER"] = self.data_folder.text().strip()
         data["REPORT_TEMPLATE_FILE_PATH"] = self.report_template.text().strip()
         data["CASE_FOLDER_NAME_REGEX"] = self.case_regex.text().strip()
         data["record_csv_file"] = self.record_csv.text().strip()
         data["new_case_email_to"] = error_email_to_list(self.new_case_email_to.toPlainText())
-        data["docuforms2_form_id"] = self.docuforms2_form_id.text().strip()
+        data.pop("docuforms2_form_id", None)
         data["DICOM_PLAN_FILE"] = self.plan_file.text().strip()
         data["IGNORE_BEAMS"] = parse_int_list(self.ignore_beams.text())
         data["ALL_RI_IMAGE_REQUIRED"] = self.all_ri_required.isChecked()
@@ -353,6 +397,125 @@ class MachineForm(QWidget):
         data["nominal_table_angles"] = parse_csv_numbers(self.table_angles.text())
         data["nominal_collimator_angles"] = parse_csv_numbers(self.coll_angles.text())
         return data
+
+
+class InstallWatchServiceDialog(QDialog):
+    """Collect NSSM paths and the Windows account that can reach the UNC shares."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Install Watcher as Service")
+        self.setModal(True)
+        self.resize(640, 480)
+        plan = default_plan()
+
+        self.service_name = QLineEdit(plan.service_name)
+        self.display_name = QLineEdit(plan.display_name)
+        self.nssm_exe = QLineEdit(plan.nssm_exe)
+        self.program_exe = QLineEdit(plan.program_exe)
+        self.app_parameters = QLineEdit(plan.app_parameters)
+        self.app_directory = QLineEdit(plan.app_directory)
+        self.settings_file = QLineEdit(plan.settings_file)
+        self.use_account = QCheckBox("Log on as this account (needed for UNC share access)")
+        self.use_account.setChecked(bool(plan.account))
+        self.account = QLineEdit(plan.account)
+        self.account.setPlaceholderText(r"DOMAIN\username")
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("Windows password for that account")
+        self.replace_existing = QCheckBox("Replace the service if it already exists")
+        self.replace_existing.setChecked(True)
+        self.start_after = QCheckBox("Start the service after install")
+        self.start_after.setChecked(True)
+        self.use_account.toggled.connect(self._sync_account)
+        self.program_exe.textChanged.connect(self._sync_app_parameters)
+
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.addRow("service_name", self.service_name)
+        form.addRow("display_name", self.display_name)
+        form.addRow("nssm.exe", self._path_row(self.nssm_exe, "nssm"))
+        form.addRow("program", self._path_row(self.program_exe, "exe"))
+        form.addRow("arguments", self.app_parameters)
+        form.addRow("app_directory", self._path_row(self.app_directory, "dir"))
+        form.addRow("settings_file", self._path_row(self.settings_file, "json"))
+        form.addRow("", self.use_account)
+        form.addRow("account", self.account)
+        form.addRow("password", self.password)
+        form.addRow("", self.replace_existing)
+        form.addRow("", self.start_after)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Install")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(
+            _hint_label(
+                "Installs the watcher with NSSM (https://nssm.cc). Packaged app: "
+                "WinstonLutz.exe with arguments watch (no separate Python). From source: "
+                "python.exe with -u -m winstonlutz watch. Use the same Windows account as "
+                "the old C# service so UNC shares work. Administrator rights are required. "
+                "Stop WinstonLutzWindowsService first so both watchers do not run."
+            )
+        )
+        layout.addWidget(buttons)
+        self._sync_account()
+
+    def _path_row(self, edit: QLineEdit, kind: str) -> QWidget:
+        btn = QPushButton("...")
+        btn.setFixedWidth(32)
+        btn.clicked.connect(lambda: self._browse(edit, kind))
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(edit, 1)
+        layout.addWidget(btn, 0)
+        return row
+
+    def _browse(self, edit: QLineEdit, kind: str) -> None:
+        start = edit.text().strip()
+        if kind == "dir":
+            path = QFileDialog.getExistingDirectory(self, "Select folder", start)
+        elif kind == "json":
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select settings file", start, "JSON (*.json);;All files (*)"
+            )
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select executable", start, "Programs (*.exe);;All files (*)"
+            )
+        if path:
+            edit.setText(path)
+
+    def _sync_account(self, *_args) -> None:
+        on = self.use_account.isChecked()
+        self.account.setEnabled(on)
+        self.password.setEnabled(on)
+
+    def _sync_app_parameters(self, *_args) -> None:
+        current = self.app_parameters.text().strip()
+        if current and current not in (SOURCE_APP_PARAMETERS, FROZEN_APP_PARAMETERS):
+            return
+        self.app_parameters.setText(default_app_parameters(self.program_exe.text().strip()))
+
+    def plan(self) -> WatchServicePlan:
+        return WatchServicePlan(
+            service_name=self.service_name.text().strip(),
+            display_name=self.display_name.text().strip(),
+            nssm_exe=self.nssm_exe.text().strip(),
+            program_exe=self.program_exe.text().strip(),
+            app_parameters=self.app_parameters.text().strip(),
+            app_directory=self.app_directory.text().strip(),
+            settings_file=self.settings_file.text().strip(),
+            account=self.account.text().strip() if self.use_account.isChecked() else "",
+            password=self.password.text() if self.use_account.isChecked() else "",
+            start_after=self.start_after.isChecked(),
+            replace_existing=self.replace_existing.isChecked(),
+        )
 
 
 class SettingsDialog(QDialog):
@@ -436,25 +599,59 @@ class SettingsDialog(QDialog):
         self.watch_path.setText(watcher.get("watch_path") or "")
         self.watch_path.setPlaceholderText(r"\\varianfs\VA_TRANSFER\QA\2.IGRT")
         self.watch_data_root = QLineEdit()
-        self.watch_data_root.setText(watcher.get("data_root") or "")
+        self.watch_data_root.setText(watcher.get("winstonlutz_data_root") or "")
         self.watch_data_root.setPlaceholderText(r"\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz")
-        self.watch_recursive = QCheckBox("Watch subfolders (recursive)")
-        self.watch_recursive.setChecked(bool(watcher.get("recursive", True)))
+        self.watch_recursive = QCheckBox("Watch subfolders")
+        self.watch_recursive.setChecked(bool(watcher.get("watch_subfolders", True)))
+        self.watch_disk_scan = QCheckBox("Scan disk for missed cases (UNC backup)")
+        self.watch_disk_scan.setChecked(
+            bool(watcher.get("disk_scan_for_new_case_detection", DEFAULT_WATCH_DISK_SCAN))
+        )
         self.watch_file_patterns = QPlainTextEdit()
-        self.watch_file_patterns.setPlainText("\n".join(watcher.get("file_patterns") or []))
+        self.watch_file_patterns.setPlainText("\n".join(watcher.get("new_case_file_patterns") or []))
         self.watch_file_patterns.setPlaceholderText("RE.*.dcm")
         self.watch_file_patterns.setTabChangesFocus(True)
         self.watch_file_patterns.setFixedHeight(56)
         self.watch_case_folder_regex = QLineEdit()
-        self.watch_case_folder_regex.setText(str(watcher.get("case_folder_regex") or ""))
+        self.watch_case_folder_regex.setText(str(watcher.get("case_folder_name_regex") or ""))
         self.watch_case_folder_regex.setPlaceholderText(r"^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
         self.watch_case_dir_levels = QSpinBox()
         self.watch_case_dir_levels.setRange(1, 8)
-        self.watch_case_dir_levels.setValue(int(watcher.get("case_dir_levels") or 1))
+        self.watch_case_dir_levels.setValue(int(watcher.get("machine_to_case_dir_levels") or 1))
         self.watch_poll_sec = QDoubleSpinBox()
         self.watch_poll_sec.setRange(0.5, 3600.0)
         self.watch_poll_sec.setDecimals(1)
-        self.watch_poll_sec.setValue(float(watcher.get("poll_sec") or 10.0))
+        self.watch_poll_sec.setValue(float(watcher.get("queued_case_poll_sec") or DEFAULT_WATCH_POLL_SEC))
+        self.watch_disk_scan_sec = QDoubleSpinBox()
+        self.watch_disk_scan_sec.setRange(0.5, 3600.0)
+        self.watch_disk_scan_sec.setDecimals(1)
+        self.watch_disk_scan_sec.setValue(
+            float(watcher.get("disk_scan_for_new_case_detection_sec") or DEFAULT_WATCH_DISK_SCAN_SEC)
+        )
+        self.watch_disk_scan.toggled.connect(self.watch_disk_scan_sec.setEnabled)
+        self.watch_disk_scan_sec.setEnabled(self.watch_disk_scan.isChecked())
+        self.watch_archive = QCheckBox("Archive old cases from WATCH_FOLDER to DATA_FOLDER")
+        self.watch_archive.setChecked(bool(watcher.get("archive_old_cases", DEFAULT_WATCH_ARCHIVE)))
+        self.watch_archive_age_days = QSpinBox()
+        self.watch_archive_age_days.setRange(1, 365)
+        self.watch_archive_age_days.setSuffix(" days")
+        try:
+            self.watch_archive_age_days.setValue(
+                int(watcher.get("archive_cases_older_than_days") or DEFAULT_WATCH_ARCHIVE_AGE_DAYS)
+            )
+        except (TypeError, ValueError):
+            self.watch_archive_age_days.setValue(DEFAULT_WATCH_ARCHIVE_AGE_DAYS)
+        self.watch_archive_at = QTimeEdit()
+        self.watch_archive_at.setDisplayFormat("HH:mm")
+        at_parts = str(
+            watcher.get("archive_old_cases_at") or DEFAULT_WATCH_ARCHIVE_AT
+        ).split(":")
+        try:
+            self.watch_archive_at.setTime(QTime(int(at_parts[0]), int(at_parts[1])))
+        except (TypeError, ValueError, IndexError):
+            self.watch_archive_at.setTime(QTime(1, 0))
+        self.watch_archive.toggled.connect(self._sync_archive_ui)
+        self._sync_archive_ui()
         df = {**default_docuforms2_igrt_step(), **find_post_step(DOCUFORMS2_IGRT_TYPE, self._original)}
         self.df_enabled = QCheckBox("Upload IGRT results to DocuForms2 after analysis")
         self.df_enabled.setChecked(_as_bool(df.get("enabled", True)))
@@ -467,8 +664,8 @@ class SettingsDialog(QDialog):
         self.df_dry_run.setChecked(_as_bool(df.get("dry_run", False)))
         self.df_zip = QCheckBox("Attach input_dcm.zip")
         self.df_zip.setChecked(_as_bool(df.get("attach_dcm_zip", True)))
-        self.df_pdf = QCheckBox("Attach report.pdf (needs weasyprint)")
-        self.df_pdf.setChecked(_as_bool(df.get("attach_pdf", False)))
+        self.df_pdf = QCheckBox("Attach report.pdf (full report.html)")
+        self.df_pdf.setChecked(_as_bool(df.get("attach_pdf", True)))
         self.df_resubmit = QCheckBox("Resubmit cases that already have .docuforms2_igrt.json")
         self.df_resubmit.setChecked(_as_bool(df.get("resubmit", False)))
         self.df_timeout = QSpinBox()
@@ -477,6 +674,28 @@ class SettingsDialog(QDialog):
             self.df_timeout.setValue(int(df.get("timeout_sec") or 300))
         except (TypeError, ValueError):
             self.df_timeout.setValue(300)
+        self.df_form_ids = QPlainTextEdit()
+        form_id_rows = form_ids_from_step(df) or form_ids_from_machines(
+            self._original.get(MACHINES_KEY)
+        )
+        self.df_form_ids.setPlainText(format_form_ids(form_id_rows))
+        self.df_form_ids.setPlaceholderText("Edge = sb_edge_mlc_wl")
+        self.df_form_ids.setTabChangesFocus(True)
+        self.df_form_ids.setFixedHeight(110)
+        self.df_email_success_event_to = QPlainTextEdit()
+        self.df_email_success_event_to.setPlainText(
+            format_error_email_to(df.get("email_success_event_to"))
+        )
+        self.df_email_success_event_to.setPlaceholderText("one address per line")
+        self.df_email_success_event_to.setTabChangesFocus(True)
+        self.df_email_success_event_to.setFixedHeight(72)
+        self.df_email_failure_event_to = QPlainTextEdit()
+        self.df_email_failure_event_to.setPlainText(
+            format_error_email_to(df.get("email_failure_event_to"))
+        )
+        self.df_email_failure_event_to.setPlaceholderText("one address per line")
+        self.df_email_failure_event_to.setTabChangesFocus(True)
+        self.df_email_failure_event_to.setFixedHeight(72)
         oidc = oidc_settings(self._original)
         self.user_id_method = QComboBox()
         self.user_id_method.addItems(list(USER_ID_METHODS))
@@ -517,9 +736,11 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._general_page(), "General")
+        tabs.addTab(self._identity_page(), "Identity")
         tabs.addTab(self._machines_page(), "Machines")
         tabs.addTab(self._notifications_page(), "Notifications")
         tabs.addTab(self._postprocess_page(), "Post-processing")
+        tabs.addTab(self._watcher_page(), "Watcher")
 
         self.save_btn = QPushButton("Save")
         self.close_btn = QPushButton("Close")
@@ -557,49 +778,140 @@ class SettingsDialog(QDialog):
         form.addRow("Institution", self.institution)
         form.addRow("RunMode", self.run_mode)
         form.addRow("Settings file", self.path_label)
-        hint = QLabel(
-            "Clinic: Open Case picks a configured machine, then a case. "
-            "Simple: Open Case picks a folder of RI images; the parent folder is the machine name. "
-            "Simple is also used when this file is missing or MACHINES is empty. "
-            "Error alerts (email and chat) are on the Notifications tab."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b;")
-        form.addRow("", hint)
         layout.addLayout(form)
-        layout.addWidget(self._identity_group())
-        layout.addWidget(self._watcher_group())
+        layout.addWidget(
+            _hint_label(
+                "Clinic: Open Case picks a configured machine, then a case. "
+                "Simple: Open Case picks a folder of RI images; the parent folder is the machine name. "
+                "Simple is also used when this file is missing or MACHINES is empty. "
+                "Login is on the Identity tab. The Windows watch service is on the Watcher tab. "
+                "Error alerts (email and chat) are on the Notifications tab."
+            )
+        )
         layout.addStretch(1)
         return page
 
+    def _identity_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.addWidget(self._identity_group())
+        layout.addStretch(1)
+        return _scroll_page(inner)
+
+    def _watcher_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.addWidget(self._watcher_group())
+        if is_windows():
+            install_btn = QPushButton("Install Watcher as Service")
+            install_btn.clicked.connect(self._install_watch_service)
+            layout.addWidget(install_btn)
+        layout.addStretch(1)
+        return _scroll_page(inner)
+
     def _watcher_group(self) -> QGroupBox:
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.addRow("watch_path", self.watch_path)
-        form.addRow("data_root", self.watch_data_root)
-        form.addRow("", self.watch_recursive)
-        form.addRow("file_patterns", self.watch_file_patterns)
-        form.addRow("case_folder_regex", self.watch_case_folder_regex)
-        form.addRow("case_dir_levels", self.watch_case_dir_levels)
-        form.addRow("poll_sec", self.watch_poll_sec)
-        hint = QLabel(
-            "Used by python -m winstonlutz watch (Windows service via NSSM), not the GUI. "
-            "file_patterns are filename globs (one per line); default RE.*.dcm. "
-            "recursive watches machine/case subfolders. "
-            "The case folder is that many parents above the trigger file (1 = same folder as the file). "
-            "case_folder_regex must match that folder name; leave empty to accept any name. "
-            "Machine name is still the parent of the case folder (Edge/26-09-23_... → Edge). "
-            "Analysis settings come from MACHINES."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b;")
-        form.addRow("", hint)
+        form.addRow("winstonlutz_data_root", self.watch_data_root)
+        form.addRow("watch_subfolders", self.watch_recursive)
+        form.addRow("disk_scan_for_new_case_detection", self.watch_disk_scan)
+        form.addRow("new_case_file_patterns", self.watch_file_patterns)
+        form.addRow("case_folder_name_regex", self.watch_case_folder_regex)
+        form.addRow("machine_to_case_dir_levels", self.watch_case_dir_levels)
+        form.addRow("queued_case_poll_sec", self.watch_poll_sec)
+        form.addRow("disk_scan_for_new_case_detection_sec", self.watch_disk_scan_sec)
+        form.addRow("archive_old_cases", self.watch_archive)
+        form.addRow("archive_cases_older_than_days", self.watch_archive_age_days)
+        form.addRow("archive_old_cases_at", self.watch_archive_at)
         box = QGroupBox("Watcher (Windows service)")
-        box.setLayout(form)
+        root = QVBoxLayout(box)
+        root.addLayout(form)
+        root.addWidget(
+            _hint_label(
+                "Used by WinstonLutz.exe watch or python -m winstonlutz watch "
+                "(Windows service via NSSM), not the GUI. "
+                "new_case_file_patterns are filename globs (one per line); default RE.*.dcm. "
+                "watch_subfolders watches machine/case subfolders. "
+                "machine_to_case_dir_levels is how many parents above the trigger file is the case folder "
+                "(1 = same folder as the file). "
+                "case_folder_name_regex must match that folder name; leave empty to accept any name. "
+                "Machine name is still the parent of the case folder (Edge/26-09-23_... → Edge). "
+                "queued_case_poll_sec is how often a queued case is started. "
+                "disk_scan_for_new_case_detection walks the share for folders watchdog missed; "
+                "disk_scan_for_new_case_detection_sec is that interval. "
+                "archive_old_cases moves folders older than archive_cases_older_than_days from each machine "
+                "WATCH_FOLDER to DATA_FOLDER at archive_old_cases_at (local time, about a 3-hour window). "
+                "Analysis settings come from MACHINES."
+            )
+        )
         return box
 
+    def _install_watch_service(self) -> None:
+        dlg = InstallWatchServiceDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        plan = dlg.plan()
+        if not plan.nssm_exe:
+            QMessageBox.warning(
+                self,
+                "NSSM not found",
+                "nssm.exe was not found. Install NSSM from https://nssm.cc, "
+                "add it to PATH, or choose nssm.exe in the dialog.",
+            )
+            QDesktopServices.openUrl(QUrl("https://nssm.cc"))
+            return
+        if plan.account and not plan.password:
+            if (
+                QMessageBox.question(
+                    self,
+                    "No password",
+                    "Account is set but the password is empty. Install anyway?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                != QMessageBox.Yes
+            ):
+                return
+        save = QMessageBox.question(
+            self,
+            "Save settings",
+            "Save the current settings to disk before installing the service?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if save == QMessageBox.Cancel:
+            return
+        if save == QMessageBox.Yes:
+            self._save_settings()
+        if not is_admin():
+            commands = format_nssm_commands(plan)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Administrator required")
+            box.setText(
+                "Installing a Windows service requires Administrator. "
+                "Run this GUI as Administrator and try again, or run the NSSM commands "
+                "in an elevated prompt (password is shown as <password>)."
+            )
+            box.setDetailedText(commands)
+            box.exec_()
+            return
+        ok, log = install_watch_service(plan)
+        if ok:
+            QMessageBox.information(self, "Watcher service", f"Service installed.\n\n{log}")
+        else:
+            QMessageBox.critical(self, "Watcher service", f"Install failed.\n\n{log}")
+
+    def _sync_archive_ui(self, *_args) -> None:
+        enabled = self.watch_archive.isChecked()
+        self.watch_archive_age_days.setEnabled(enabled)
+        self.watch_archive_at.setEnabled(enabled)
+
     def _postprocess_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         form = QFormLayout()
         form.addRow("", self.df_enabled)
         form.addRow("backend_url", self.df_backend)
@@ -609,23 +921,28 @@ class SettingsDialog(QDialog):
         form.addRow("", self.df_pdf)
         form.addRow("", self.df_resubmit)
         form.addRow("timeout_sec", self.df_timeout)
-        hint = QLabel(
-            "After analysis, winstonlutz can push the case to DocuForms2 "
-            "(same payload as _ref_projects/docuforms_import/scripts/upload_igrt). "
-            "Set each machine’s docuforms2_form_id (sb_edge_mlc_wl, sb_edge_cone_wl, "
-            "sb_truebeam_mlc_wl). Empty form id skips that machine. "
-            "Successful uploads write .docuforms2_igrt.json in the case folder so the "
-            "watcher does not submit twice. Cases are not moved. "
-            "More PostProcessing types can be added later in JSON."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b;")
-        form.addRow("", hint)
+        form.addRow("form_ids", self.df_form_ids)
+        form.addRow("email_success_event_to", self.df_email_success_event_to)
+        form.addRow("email_failure_event_to", self.df_email_failure_event_to)
         box = QGroupBox("DocuForms2 IGRT")
-        box.setLayout(form)
+        root = QVBoxLayout(box)
+        root.addLayout(form)
+        root.addWidget(
+            _hint_label(
+                "After analysis, winstonlutz can push the case to DocuForms2 "
+                "(same payload as _ref_projects/docuforms_import/scripts/upload_igrt). "
+                "form_ids maps machine NAME to a DocuForms2 form (one per line: "
+                "Edge = sb_edge_mlc_wl). A machine with no row is skipped. "
+                "Successful uploads write .docuforms2_igrt.json in the case folder so the "
+                "watcher does not submit twice. Cases are not moved. "
+                "email_success_event_to gets ok / dry-run; email_failure_event_to gets failed "
+                "(clinic SMTP from Notifications). Skipped cases are not emailed. "
+                "More PostProcessing types can be added later in JSON."
+            )
+        )
         layout.addWidget(box)
         layout.addStretch(1)
-        return page
+        return _scroll_page(inner)
 
     def _identity_group(self) -> QGroupBox:
         form = QFormLayout()
@@ -637,21 +954,21 @@ class SettingsDialog(QDialog):
         form.addRow("redirect_uri", self.oidc_redirect)
         form.addRow("registration_url", self.oidc_registration)
         form.addRow("", self.oidc_register_btn)
-        hint = QLabel(
-            "None: no user id. OSUser: Windows / Linux / macOS login (no extra prompt). "
-            "OIDC is the protocol; Keycloak is the issuer. No separate Keycloak method. "
-            "At startup the app opens a Sign in window, then your browser (Authorization Code + PKCE). "
-            "Create a dedicated public client (winstonlutz), not account-console. "
-            "Add redirect_uri exactly to Valid redirect URIs; use 127.0.0.1, not localhost "
-            "(http://127.0.0.1:17843/callback). Standard flow + PKCE S256. "
-            "registration_url is the Account Console ({issuer}/account/), not "
-            "/protocol/openid-connect/registrations. Profiles go under _users."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #64748b;")
-        form.addRow("", hint)
         box = QGroupBox("Identity")
-        box.setLayout(form)
+        root = QVBoxLayout(box)
+        root.addLayout(form)
+        root.addWidget(
+            _hint_label(
+                "None: no user id. OSUser: Windows / Linux / macOS login (no extra prompt). "
+                "OIDC is the protocol; Keycloak is the issuer. No separate Keycloak method. "
+                "At startup the app opens a Sign in window, then your browser (Authorization Code + PKCE). "
+                "Create a dedicated public client (winstonlutz), not account-console. "
+                "Add redirect_uri exactly to Valid redirect URIs; use 127.0.0.1, not localhost "
+                "(http://127.0.0.1:17843/callback). Standard flow + PKCE S256. "
+                "registration_url is the Account Console ({issuer}/account/), not "
+                "/protocol/openid-connect/registrations. Profiles go under _users."
+            )
+        )
         self._sync_identity_ui()
         return box
 
@@ -940,12 +1257,17 @@ class SettingsDialog(QDialog):
         data[IDENTITY_KEY] = ident
         data[WATCHER_KEY] = {
             "watch_path": self.watch_path.text().strip(),
-            "data_root": self.watch_data_root.text().strip(),
-            "recursive": self.watch_recursive.isChecked(),
-            "file_patterns": normalize_file_patterns(self.watch_file_patterns.toPlainText()),
-            "case_folder_regex": self.watch_case_folder_regex.text().strip(),
-            "case_dir_levels": self.watch_case_dir_levels.value(),
-            "poll_sec": self.watch_poll_sec.value(),
+            "winstonlutz_data_root": self.watch_data_root.text().strip(),
+            "watch_subfolders": self.watch_recursive.isChecked(),
+            "new_case_file_patterns": normalize_file_patterns(self.watch_file_patterns.toPlainText()),
+            "case_folder_name_regex": self.watch_case_folder_regex.text().strip(),
+            "machine_to_case_dir_levels": self.watch_case_dir_levels.value(),
+            "queued_case_poll_sec": self.watch_poll_sec.value(),
+            "disk_scan_for_new_case_detection": self.watch_disk_scan.isChecked(),
+            "disk_scan_for_new_case_detection_sec": self.watch_disk_scan_sec.value(),
+            "archive_old_cases": self.watch_archive.isChecked(),
+            "archive_cases_older_than_days": self.watch_archive_age_days.value(),
+            "archive_old_cases_at": self.watch_archive_at.time().toString("HH:mm"),
         }
         email_to = error_email_to_list(self.error_email_to.toPlainText())
         event_to = error_email_to_list(self.event_email_to.toPlainText())
@@ -990,11 +1312,22 @@ class SettingsDialog(QDialog):
             "attach_pdf": self.df_pdf.isChecked(),
             "resubmit": self.df_resubmit.isChecked(),
             "timeout_sec": self.df_timeout.value(),
+            "form_ids": parse_form_ids_text(self.df_form_ids.toPlainText()),
+            "email_success_event_to": error_email_to_list(
+                self.df_email_success_event_to.toPlainText()
+            ),
+            "email_failure_event_to": error_email_to_list(
+                self.df_email_failure_event_to.toPlainText()
+            ),
         }
         data[POST_PROCESSING_KEY] = upsert_post_step(
             post_processing_steps(self._original), df_step
         )
-        data[MACHINES_KEY] = copy.deepcopy(self._machines)
+        machines = copy.deepcopy(self._machines)
+        for machine in machines:
+            if isinstance(machine, dict):
+                machine.pop("docuforms2_form_id", None)
+        data[MACHINES_KEY] = machines
         return data
 
     def _save_settings(self) -> None:

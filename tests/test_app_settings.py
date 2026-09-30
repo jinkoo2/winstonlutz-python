@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from winstonlutz.app_settings import SETTINGS_NAME, app_dir, user_config_path
+from winstonlutz.app_settings import (
+    LEGACY_SETTINGS_NAME,
+    SETTINGS_NAME,
+    app_dir,
+    load_gui_settings,
+    save_gui_settings,
+    user_config_path,
+)
 from winstonlutz.config import Param
 
 
@@ -20,6 +27,57 @@ def test_config_lives_next_to_app(monkeypatch):
     assert path.name == SETTINGS_NAME
     assert path.parent == app_dir()
     assert "Roaming" not in path.parts
+
+
+def test_legacy_settings_name_is_read_then_save_uses_settings_json(tmp_path, monkeypatch):
+    monkeypatch.delenv("WINSTONLUTZ_APP_CONFIG", raising=False)
+    monkeypatch.setattr("winstonlutz.app_settings.app_dir", lambda: tmp_path)
+    legacy = tmp_path / LEGACY_SETTINGS_NAME
+    legacy.write_text('{"Institution": "Legacy Clinic"}\n', encoding="utf-8")
+    assert user_config_path().name == LEGACY_SETTINGS_NAME
+    assert load_gui_settings()["Institution"] == "Legacy Clinic"
+    save_gui_settings({"Institution": "New Clinic"})
+    assert (tmp_path / SETTINGS_NAME).is_file()
+    assert load_gui_settings()["Institution"] == "New Clinic"
+
+
+def test_strip_jsonc_and_load_settings(tmp_path, monkeypatch):
+    from winstonlutz.app_settings import load_gui_settings, strip_jsonc
+
+    raw = """
+    // header
+    {
+      "Institution": "Test",
+      "url": "https://example.com/path", // keep the URL
+      "path": "C:\\\\share\\\\QA",
+      /* block
+         comment */
+      "Watcher": { "queued_case_poll_sec": 10 }
+    }
+    """
+    stripped = strip_jsonc(raw)
+    assert "header" not in stripped
+    assert "block" not in stripped
+    assert "https://example.com/path" in stripped
+    cfg = tmp_path / SETTINGS_NAME
+    cfg.write_text(raw, encoding="utf-8")
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(cfg))
+    data = load_gui_settings()
+    assert data["Institution"] == "Test"
+    assert data["url"] == "https://example.com/path"
+    assert data["Watcher"]["queued_case_poll_sec"] == 10
+
+
+def test_sample_settings_jsonc_loads():
+    import json
+    from pathlib import Path
+
+    from winstonlutz.app_settings import strip_jsonc
+
+    sample = Path(__file__).resolve().parents[1] / "settings.sample.json"
+    data = json.loads(strip_jsonc(sample.read_text(encoding="utf-8")))
+    assert data["Watcher"]["archive_old_cases"] is True
+    assert data["MACHINES"][0]["NAME"] == "Edge"
 
 
 def test_find_machine_for_folder(tmp_path, monkeypatch):
@@ -53,6 +111,30 @@ def test_find_machine_for_folder(tmp_path, monkeypatch):
         assert False
     except ValueError:
         pass
+
+
+def test_find_machine_for_watch_folder(tmp_path, monkeypatch):
+    from winstonlutz.app_settings import find_machine_for_folder, save_gui_settings
+
+    cfg = tmp_path / SETTINGS_NAME
+    watch = tmp_path / "Edge"
+    case = watch / "26-09-30_06-27-37"
+    case.mkdir(parents=True)
+    monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(cfg))
+    save_gui_settings(
+        {
+            "MACHINES": [
+                {
+                    "NAME": "Edge",
+                    "WATCH_FOLDER": str(watch),
+                    "DATA_FOLDER": str(tmp_path / "archive" / "Edge" / "Data"),
+                }
+            ]
+        }
+    )
+    found = find_machine_for_folder(case)
+    assert found is not None
+    assert found["NAME"] == "Edge"
 
 
 def test_machine_name_is_case_parent(tmp_path, monkeypatch):
@@ -110,6 +192,29 @@ def test_list_case_folders_skips_empty(tmp_path):
     assert not case_has_ri(empty)
     cases = list_case_folders(machine)
     assert [p.name for p in cases] == ["26-09-25_06-15-37"]
+
+
+def test_list_case_candidates_watch_then_data(tmp_path):
+    from winstonlutz.app_settings import machine_case_roots
+    from winstonlutz.pipeline import list_case_candidates
+
+    watch = tmp_path / "Watch"
+    data = tmp_path / "Data"
+    live = watch / "26-09-30_08-00-00"
+    live.mkdir(parents=True)
+    archived = data / "26-09-24_06-13-24"
+    archived.mkdir(parents=True)
+    duplicate = data / "26-09-30_08-00-00"
+    duplicate.mkdir()
+    machine = {
+        "WATCH_FOLDER": str(watch),
+        "DATA_FOLDER": str(data),
+        "CASE_FOLDER_NAME_REGEX": r"^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$",
+    }
+    assert machine_case_roots(machine) == [watch, data]
+    found = list_case_candidates(machine)
+    assert [p.name for p in found] == ["26-09-30_08-00-00", "26-09-24_06-13-24"]
+    assert found[0] == live
 
 
 def test_case_open_status_from_report(tmp_path):
@@ -253,6 +358,7 @@ def test_default_machine_and_csv_numbers():
 
     machine = default_machine("Edge")
     assert machine["NAME"] == "Edge"
+    assert machine["WATCH_FOLDER"] == ""
     assert "kV_field_search" not in machine
     assert machine["kV_field_search_method"] == "ImageCenter"
     assert machine["ALL_RI_IMAGE_REQUIRED"] is False
@@ -271,7 +377,7 @@ def test_is_simple_run_mode(tmp_path, monkeypatch):
         simple_machine_name,
     )
 
-    cfg = tmp_path / "winstonlutz.gui.settings.json"
+    cfg = tmp_path / SETTINGS_NAME
     monkeypatch.setenv("WINSTONLUTZ_APP_CONFIG", str(cfg))
     assert is_simple_run_mode() is True
     save_gui_settings({})

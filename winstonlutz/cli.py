@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     p_watch.add_argument(
         "--data-root",
         default="",
-        help="WinstonLutz data tree (default: Watcher.data_root in settings JSON)",
+        help="WinstonLutz data tree (default: Watcher.winstonlutz_data_root in settings JSON)",
     )
 
     p_val = sub.add_parser("validate-golden", help="compare analysis to sample_data result.txt")
@@ -89,16 +89,21 @@ def main(argv: list[str] | None = None) -> int:
 
         cfg = watcher_settings()
         watch_path = (args.watch_path or cfg.get("watch_path") or "").strip()
-        data_root = (args.data_root or cfg.get("data_root") or "").strip()
+        data_root = (args.data_root or cfg.get("winstonlutz_data_root") or "").strip()
         if not watch_path or not data_root:
             print(
                 "watch needs --watch-path and --data-root, or Watcher.watch_path and "
-                "Watcher.data_root in winstonlutz.gui.settings.json",
+                "Watcher.winstonlutz_data_root in settings.json",
                 file=sys.stderr,
             )
             return 2
         try:
-            watch(watch_path, data_root, poll_sec=cfg.get("poll_sec"), watcher=cfg)
+            watch(
+                watch_path,
+                data_root,
+                poll_sec=cfg.get("queued_case_poll_sec"),
+                watcher=cfg,
+            )
         except WatchPathUnavailable as exc:
             print(exc, file=sys.stderr)
             return 1

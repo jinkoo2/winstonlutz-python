@@ -486,6 +486,48 @@ def send_error_email(
         return
 
 
+def send_list_email(
+    to,
+    message: str,
+    details: str = "",
+    *,
+    context: str = "event",
+    subject: str | None = None,
+    blocking: bool = True,
+    data: dict | None = None,
+) -> None:
+    """Send *message* to an explicit address list using clinic SMTP."""
+    smtp = smtp_settings(data)
+    addresses = error_email_to_list(to)
+    if smtp is None or not addresses:
+        return
+    subj = subject or f"Winston-Lutz event: {(message or context)[:120]}"
+
+    def _run() -> None:
+        try:
+            send(
+                from_user=smtp["from_user"],
+                from_enc_pw=smtp["from_enc_pw"],
+                to=addresses,
+                subject=subj,
+                body=_error_email_body(message, context, details),
+                domain=smtp["domain"],
+                host=smtp["host"],
+                port=smtp["port"],
+                enable_ssl=smtp["enable_ssl"],
+            )
+        except Exception:
+            logger.warning("list email failed", exc_info=True)
+
+    if blocking:
+        _run()
+        return
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        return
+
+
 def send_event_email(
     message: str,
     details: str = "",
@@ -497,30 +539,13 @@ def send_event_email(
     cfg = event_email_settings()
     if cfg is None:
         return
-
-    def _run() -> None:
-        try:
-            send(
-                from_user=cfg["from_user"],
-                from_enc_pw=cfg["from_enc_pw"],
-                to=cfg["to"],
-                subject=f"Winston-Lutz event: {message[:120] or context}",
-                body=_error_email_body(message, context, details),
-                domain=cfg["domain"],
-                host=cfg["host"],
-                port=cfg["port"],
-                enable_ssl=cfg["enable_ssl"],
-            )
-        except Exception:
-            logger.warning("event notification failed", exc_info=True)
-
-    if blocking:
-        _run()
-        return
-    try:
-        threading.Thread(target=_run, daemon=True).start()
-    except Exception:
-        return
+    send_list_email(
+        cfg["to"],
+        message,
+        details,
+        context=context,
+        blocking=blocking,
+    )
 
 
 class ExceptionEmailHandler(logging.Handler):

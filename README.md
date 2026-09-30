@@ -25,46 +25,62 @@ The GUI is **not** the service. C# `WinstonLutzWindowsService` is a headless wat
 python -m winstonlutz watch
 ```
 
-It watches for trigger files matching **`Watcher.file_patterns`** (default **`RE.*.dcm`**), queues the case folder (`case_dir_levels` parents up, default 1), waits a few seconds, then runs the same analysis/report/email path as C# (`winston_lutz_2d.exe` is no longer needed). Subfolders are included when **`recursive`** is true.
+It watches for trigger files matching **`Watcher.new_case_file_patterns`** (default **`RE.*.dcm`**), queues the case folder (`machine_to_case_dir_levels` parents up, default 1), waits a few seconds, then runs the same analysis/report/email path as C# (`winston_lutz_2d.exe` is no longer needed). Subfolders are included when **`watch_subfolders`** is true. When **`disk_scan_for_new_case_detection`** is true, every **`disk_scan_for_new_case_detection_sec`** it also walks `watch_path` for unprocessed case folders in case the filesystem watcher missed a create event (common on UNC shares).
 
 ### Paths (from the current C# `App.config`)
 
 | C# key | Python | Typical value |
 |---|---|---|
 | Watch Path | `Watcher.watch_path` | `\\varianfs\VA_TRANSFER\QA\2.IGRT` |
-| wl_data_root | `Watcher.data_root` | `\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz` |
+| wl_data_root | `Watcher.winstonlutz_data_root` | `\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz` |
 | Log Path | `_logs\` next to the settings file / project | C# used `...\WinstonLutz\_logs` |
 | image_tools_dir | unused | analysis is in-process |
 
-Put those paths and match rules in **Settings → General → Watcher**, or in `winstonlutz.gui.settings.json`:
+Put those paths and match rules in **Settings → Watcher**, or in `settings.json`:
 
 ```json
 "Watcher": {
   "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT",
-  "data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
-  "recursive": true,
-  "file_patterns": ["RE.*.dcm"],
-  "case_folder_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
-  "case_dir_levels": 1,
-  "poll_sec": 10
+  "winstonlutz_data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
+  "watch_subfolders": true,
+  "new_case_file_patterns": ["RE.*.dcm"],
+  "case_folder_name_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
+  "machine_to_case_dir_levels": 1,
+  "queued_case_poll_sec": 10,
+  "disk_scan_for_new_case_detection": true,
+  "disk_scan_for_new_case_detection_sec": 60,
+  "archive_old_cases": true,
+  "archive_cases_older_than_days": 7,
+  "archive_old_cases_at": "01:00"
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `file_patterns` | Filename globs that start a case. String or JSON array. Empty/missing → `RE.*.dcm`. |
-| `recursive` | Watch subfolders of `watch_path`. Default `true`. |
-| `case_folder_regex` | Case folder **name** must match (Python regex, full match). Missing → same default as machines (`YY-MM-DD_HH-MM-SS`). Empty string → any folder name. |
-| `case_dir_levels` | How many parents above the trigger file is the case folder. `1` = the file’s directory. Use `2` if Aria nests the DICOM one level deeper. |
-| `poll_sec` | Seconds between queue checks. Default `10`. |
+| `new_case_file_patterns` | Filename globs that start a case. String or JSON array. Empty/missing → `RE.*.dcm`. |
+| `watch_subfolders` | Watch subfolders of `watch_path`. Default `true`. |
+| `case_folder_name_regex` | Case folder **name** must match (Python regex, full match). Missing → same default as machines (`YY-MM-DD_HH-MM-SS`). Empty string → any folder name. |
+| `machine_to_case_dir_levels` | How many parents above the trigger file is the case folder. `1` = the file’s directory. Use `2` if Aria nests the DICOM one level deeper. |
+| `queued_case_poll_sec` | Seconds between starting the next queued case. Default `10`. |
+| `disk_scan_for_new_case_detection` | Walk `watch_path` for missed cases. Default `true`. |
+| `disk_scan_for_new_case_detection_sec` | Seconds between those walks when `disk_scan_for_new_case_detection` is true. Default `60`. Folders found only by the scan wait at least 15 s (or `queued_case_poll_sec`, whichever is larger) after the newest trigger file so Aria can finish writing. |
+| `archive_old_cases` | Nightly move of old case folders from each machine `WATCH_FOLDER` to `DATA_FOLDER`. Default `true`. |
+| `archive_cases_older_than_days` | Keep this many calendar days of cases on the transfer share. Default `7`. |
+| `archive_old_cases_at` | Local time (`HH:MM`) to start archiving. Default `01:00`. Runs in a ~3-hour window so a 1:15 service restart still archives; daytime restarts wait until the next night. Cases in the analysis queue are skipped. If the same case name already exists in `DATA_FOLDER`, the watch copy is left in place. |
 
-The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/RE.*.dcm` → `Edge`; if the parent is `Data`, the grandparent is used). Look up that name in **MACHINES**. `config.txt` and `app.config.txt` are not used. `data_root` is where JSON history and ReportTmplt live: `{data_root}\{machine}\Data\Json` and `{data_root}\{machine}\ReportTmplt` (or the template path on the machine in settings). After analysis the **full** `report.html` is emailed to **Notifications.email.new_case_email_to** (plus any extra addresses on that machine), with `result.png` files inlined (CID). Watcher start/stop goes to **event_email_to**. Crash mail uses **error_email_to**.
+The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/RE.*.dcm` → `Edge`; if the parent is `Data`, the grandparent is used). Look up that name in **MACHINES**. `config.txt` and `app.config.txt` are not used. `winstonlutz_data_root` is where JSON history and ReportTmplt live: `{winstonlutz_data_root}\{machine}\Data\Json` and `{winstonlutz_data_root}\{machine}\ReportTmplt` (or the template path on the machine in settings). After analysis the **full** `report.html` is emailed to **Notifications.email.new_case_email_to** (plus any extra addresses on that machine), with `result.png` files inlined (CID). Watcher start/stop goes to **event_email_to**. Crash mail uses **error_email_to**. A nightly archive that moved cases is emailed to **event_email_to**; archive errors go to **error_email_to**.
 
-For the GUI **Open Case** list to show live cases, set each machine `DATA_FOLDER` to the same tree the watcher writes (for example `\\varianfs\VA_TRANSFER\QA\2.IGRT\Edge` or `...\Edge\Data`).
+**Open Case** lists cases from each machine’s `WATCH_FOLDER` first, then `DATA_FOLDER`. If the same case name exists in both, the watch copy is shown. The watcher archives case folders older than `archive_cases_older_than_days` from watch to data at `archive_old_cases_at`. Older Watcher key names (`data_root`, `disk_scan`, `poll_sec`, …) are still read if present.
 
 ### Cutover
 
-1. On the service PC, install the `winstonlutz` conda env (or a venv) with `pip install .` from this repo. Confirm:
+1. On the service PC, run the packaged **WinstonLutz** app (or, from source, the `winstonlutz` conda env). Confirm watch:
+
+   ```
+   WinstonLutz.exe watch
+   ```
+
+   From source instead:
 
    ```
    conda activate winstonlutz
@@ -75,31 +91,42 @@ For the GUI **Open Case** list to show live cases, set each machine `DATA_FOLDER
 
 2. **services.msc**: stop **WinstonLutzWindowsService** (or whatever the C# service is named). Do not run C# and Python watchers at the same time — both would process the same case.
 
-3. Install **NSSM** (https://nssm.cc). Admin PowerShell, using the **env’s `python.exe`**, not `python` from PATH:
+3. On the service PC, **Settings → Watcher → Install Watcher as Service** (Windows only). The dialog asks for `nssm.exe`, the program (`WinstonLutz.exe` when packaged, `python.exe` from source), arguments (`watch` vs `-u -m winstonlutz watch`), app folder, settings file, and the Windows account that can reach the UNC shares. Administrator is required. You can still install **NSSM** (https://nssm.cc) by hand.
+
+   Packaged (no separate Python):
 
    ```
-   nssm install WinstonLutzWatch C:\Users\jkim20\AppData\Local\anaconda3\envs\winstonlutz\python.exe
-   nssm set WinstonLutzWatch AppDirectory D:\MachineQA\projects\winstonlutz
-   nssm set WinstonLutzWatch AppParameters "-u -m winstonlutz watch"
-   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\winstonlutz.gui.settings.json
+   nssm install WinstonLutzWatch C:\Apps\WinstonLutz.exe
+   nssm set WinstonLutzWatch AppDirectory C:\Apps
+   nssm set WinstonLutzWatch AppParameters watch
+   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=C:\Apps\settings.json
    nssm set WinstonLutzWatch DisplayName "Winston-Lutz Watch"
    nssm set WinstonLutzWatch Start SERVICE_AUTO_START
-   nssm set WinstonLutzWatch AppStdout D:\MachineQA\projects\winstonlutz\_logs\watch_stdout.log
-   nssm set WinstonLutzWatch AppStderr D:\MachineQA\projects\winstonlutz\_logs\watch_stderr.log
+   nssm set WinstonLutzWatch AppStdout C:\Apps\_logs\watch_stdout.log
+   nssm set WinstonLutzWatch AppStderr C:\Apps\_logs\watch_stderr.log
    nssm set WinstonLutzWatch AppRotateFiles 1
    nssm set WinstonLutzWatch ObjectName "DOMAIN\service-account" "password"
    nssm start WinstonLutzWatch
    ```
 
-   Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). `AppDirectory` is the project folder so `python -m winstonlutz` can import the package; if you `pip install .` into the env, AppDirectory can be any writable folder that holds the settings JSON.
+   From source:
+
+   ```
+   nssm install WinstonLutzWatch C:\Users\jkim20\AppData\Local\anaconda3\envs\winstonlutz\python.exe
+   nssm set WinstonLutzWatch AppDirectory D:\MachineQA\projects\winstonlutz
+   nssm set WinstonLutzWatch AppParameters "-u -m winstonlutz watch"
+   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\settings.json
+   ```
+
+   Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). For a packaged install, `AppDirectory` is the folder that holds `WinstonLutz.exe` and the settings JSON. From source, it is the project folder so `python -m winstonlutz` can import the package.
 
 4. `nssm status WinstonLutzWatch` and check `_logs\winstonlutz_YYYY-MM-DD.log` plus the NSSM stdout/stderr files.
 
 5. After a real linac export, confirm analysis and the short-report email. Then set the C# service to **Disabled** (do not uninstall until you are satisfied).
 
-6. Keep using **python -m winstonlutz gui** (or the desktop exe) on physicist PCs. That is review only; it does not replace the watcher.
+6. Keep using **WinstonLutz.exe** (or `python -m winstonlutz gui`) on physicist PCs. That is review only; it does not replace the watcher. Double-click opens the GUI; the service uses `WinstonLutz.exe watch`.
 
-`packaging/install_watch_service.ps1` prints the NSSM commands with paths filled in for this machine.
+`packaging/install_watch_service.ps1` also prints the NSSM commands with paths filled in for this machine.
 
 ## CI / CD
 
@@ -125,9 +152,9 @@ The tag must match `vMAJOR.MINOR.PATCH` (for example `v0.1.1`). Each release inc
 
 You can also run **Actions → Release → Run workflow** without a tag; that only uploads build artifacts, it does not create a GitHub Release.
 
-The GUI **Open Case** flow depends on **RunMode**. In **Clinic** mode it picks a machine from settings, then a case folder that contains `RI.*.dcm` files. In **Simple** mode it opens a directory selector for that RI folder and uses the parent folder as the machine name (see [Simple run mode](#simple-run-mode)). A heading across the top shows the institution, signed-in user, **User settings**, and **Login** / **Logout** (OIDC). **Settings** (toolbar, `Ctrl+,`) has **General**, **Machines**, then **Notifications**. General is `Institution`, `RunMode`, and **Identity** (`user_id_method`: None, OSUser, or OIDC). Machines is the `MACHINES` list (add/remove, folders, plan file, analysis knobs). Notifications holds **Email** (SMTP plus `error_email_to`, `event_email_to`, `new_case_email_to`) and incoming webhooks for **Google Chat**, **Slack**, **Microsoft Teams**, and **Discord**. Saves go to `winstonlutz.gui.settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
+The GUI **Open Case** flow depends on **RunMode**. In **Clinic** mode it picks a machine from settings, then a case folder that contains `RI.*.dcm` files. In **Simple** mode it opens a directory selector for that RI folder and uses the parent folder as the machine name (see [Simple run mode](#simple-run-mode)). A heading across the top shows the institution, signed-in user, **User settings**, and **Login** / **Logout** (OIDC). **Settings** (toolbar, `Ctrl+,`) has **General**, **Machines**, then **Notifications**. General is `Institution`, `RunMode`, and **Identity** (`user_id_method`: None, OSUser, or OIDC). Machines is the `MACHINES` list (add/remove, folders, plan file, analysis knobs). Notifications holds **Email** (SMTP plus `error_email_to`, `event_email_to`, `new_case_email_to`) and incoming webhooks for **Google Chat**, **Slack**, **Microsoft Teams**, and **Discord**. Saves go to `settings.json` next to the executable. You can run field/BB analysis, review pass/fail in a table, view `report.html`, and inspect each image (pan, wheel zoom, window/level). Red cross = field center, green cross = BB. PyQt5 is required (`pip install PyQt5` or `pip install .[gui]`).
 
-Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executable. Daily logs go in `_logs/winstonlutz_YYYY-MM-DD.log` beside that file (created on startup; older than 7 days are deleted). If the folder cannot be created, file logging is skipped. CLI `-v` and `WINSTONLUTZ_LOG_LEVEL` raise the log level. The window title shows `Institution`. Clinic SMTP is **Settings → Notifications**. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
+Per-PC settings live in `settings.json` next to the executable (GUI and watcher). Daily logs go in `_logs/winstonlutz_YYYY-MM-DD.log` beside that file (created on startup; older than 7 days are deleted). If the folder cannot be created, file logging is skipped. CLI `-v` and `WINSTONLUTZ_LOG_LEVEL` raise the log level. The window title shows `Institution`. Clinic SMTP is **Settings → Notifications**. Missing analysis keys keep the C++ defaults below, so an older settings file still runs.
 
 `validate-golden` re-runs analysis on `sample_data` and compares `result.txt` to the original C++ output (default tolerance 0.1 mm). The repo includes three machines (`Edge`, `Edge_Cone`, `TrueBeam`) with three cases each; analysis outputs (`*_out`, `report.html`) are kept for the newest case only.
 
@@ -135,7 +162,7 @@ Per-PC GUI settings live in `winstonlutz.gui.settings.json` next to the executab
 
 The GUI starts in **Simple** mode when any of these is true:
 
-- `winstonlutz.gui.settings.json` is missing
+- `settings.json` is missing
 - `MACHINES` is missing or empty (no named machines)
 - top-level `"RunMode": "Simple"` (Settings → General)
 
@@ -169,7 +196,7 @@ Simple mode does not use the `MACHINES` list: no RT Plan table, no HTML report (
 
 ## Identity
 
-**Settings → General → Identity.** `user_id_method` is `None` (default), `OSUser`, or `OIDC`.
+**Settings → Identity.** `user_id_method` is `None` (default), `OSUser`, or `OIDC`.
 
 | Method | What happens |
 |---|---|
@@ -280,7 +307,7 @@ Existing case folders are remembered on first launch so you are not emailed for 
 | Microsoft Teams | `Notifications.microsoft_teams.webhook_url` | Incoming webhook (Workflows or Office 365 connector). Posted as `{"text": "..."}`. |
 | Discord | `Notifications.discord.webhook_url` | Channel webhook. Posted as `{"content": "..."}`. |
 
-Copy `winstonlutz.gui.settings.sample.json` to `winstonlutz.gui.settings.json` next to the executable (the live file is gitignored). `settings.json` and `configs.json` are also gitignored; `configs.sample.json` is a short SMTP/webhook template. SMTP fields live only under `Notifications.email`. Older files with top-level `email_*` / `error_email_to` still work if `Notifications.email` is absent. Saving Settings writes the nested `Notifications` block and drops those top-level email keys.
+Copy `settings.sample.json` to `settings.json` next to the executable (the live file is gitignored). The settings file is **JSONC**: `//` and `/* */` comments are stripped before `json.loads`. **Settings → Save** writes strict JSON and drops comments. `configs.json` is also gitignored; `configs.sample.json` is a short SMTP/webhook template. SMTP fields live only under `Notifications.email`. Older files with top-level `email_*` / `error_email_to` still work if `Notifications.email` is absent. Saving Settings writes the nested `Notifications` block and drops those top-level email keys. An older `winstonlutz.gui.settings.json` in the same folder is still read if `settings.json` is missing.
 
 ## Post-processing
 
@@ -295,16 +322,25 @@ After analysis (watcher or GUI), winstonlutz runs **Settings → Post-processing
     "verify_ssl": false,
     "dry_run": false,
     "attach_dcm_zip": true,
-    "attach_pdf": false,
+    "attach_pdf": true,
     "resubmit": false,
-    "timeout_sec": 300
+    "timeout_sec": 300,
+    "form_ids": [
+      {"machine": "Edge", "form_id": "sb_edge_mlc_wl"},
+      {"machine": "Edge_Cone", "form_id": "sb_edge_cone_wl"},
+      {"machine": "TrueBeam", "form_id": "sb_truebeam_mlc_wl"},
+      {"machine": "TrueBeamSH_Cone", "form_id": "sb_edge_cone_wl"},
+      {"machine": "TrueBeamSH", "form_id": "pfcc_truebeamsh_mlc_wl"}
+    ],
+    "email_success_event_to": ["jinkoo.kim@stonybrookmedicine.edu"],
+    "email_failure_event_to": ["jinkoo.kim@stonybrookmedicine.edu"]
   }
 ]
 ```
 
-It submits beam offsets and result.png images to `POST {backend_url}/api/forms/{form_id}/submit`, optionally uploads `input_dcm.zip` to `/api/upload`. Form id is per machine (`docuforms2_form_id`). A successful upload writes `.docuforms2_igrt.json` in the case folder so the same case is not submitted again (`resubmit` overrides). Cases are **not** moved to `imported/`. Add further objects to the `PostProcessing` array later for other steps.
+It submits beam offsets and result.png images to `POST {backend_url}/api/forms/{form_id}/submit`, optionally uploads `input_dcm.zip` and **`report.pdf`** (from the full `report.html`) to `/api/upload`. Form id comes from **`form_ids`** (`machine` → `form_id`). A machine with no row is skipped. A successful upload writes `.docuforms2_igrt.json` in the case folder so the same case is not submitted again (`resubmit` overrides). Cases are **not** moved to `imported/`. `email_success_event_to` is emailed for `ok` / `dry-run`; `email_failure_event_to` for `failed` (clinic SMTP from **Notifications**). Skipped cases are not emailed. Add further objects to the `PostProcessing` array later for other steps.
 
-## Machine settings (`winstonlutz.gui.settings.json`)
+## Machine settings (`settings.json`)
 
 Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings → Machines**, or the JSON file. After changing geometry or classification keys, **re-run analysis** on a known case before trusting new numbers — offsets in `result.txt` are not comparable across different `crop_mm` / `sad_mm`.
 
@@ -315,7 +351,8 @@ Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings →
 | `Institution` (top-level) | Shown in the GUI window title. | Set once per PC to the hospital name. |
 | `RunMode` (top-level) | `Clinic` (default) or `Simple`. Simple also applies when the settings file is missing or `MACHINES` is empty. | Use `Simple` for a one-folder Open Case picker without a machine list. |
 | `NAME` | Label in **Open Case** and in reports. | New machine, or to match the folder name under the data tree. |
-| `DATA_FOLDER` | Directory that contains case folders (`YY-MM-DD_HH-MM-SS`). | Path to that linac’s `Data` folder on this PC. |
+| `WATCH_FOLDER` | Live case folders from Aria transfer (`YY-MM-DD_HH-MM-SS`). **Open Case** lists this tree first. | Clinic: `\\varianfs\VA_TRANSFER\QA\2.IGRT\{machine}` (Edge, TrueBeam, …). |
+| `DATA_FOLDER` | Archive of case folders. **Open Case** lists this after `WATCH_FOLDER`. Nightly watcher archive lands here. | Path to that linac’s `Data` folder on this PC. |
 | `DICOM_PLAN_FILE` | Path to that machine’s RT Plan (`RP*.dcm`). When set, **Open Case** builds the table from plan beams (Beam, Name, Type, Gantry, Table, Coll) and matches each `RI.*.dcm` by `ReferencedBeamNumber`. The first read writes `{RP file}.json` beside it; later opens use that JSON unless the DICOM is newer or the JSON is missing. | Edge sample: `sample_data/Edge/Plan/RP.EdgeDryRun.WL.dcm`. Omit until you have a plan; the table is one row per RI and **Name** is `Gxxx_Tyyy_Czzz` from the snapped angles. |
 | `IGNORE_BEAMS` | Plan beam numbers that are listed in the table but not scored. No RI shows **NA** (not Missing). They never fail `ALL_RI_IMAGE_REQUIRED`. | Edge CBCT is beam `2`: `[2]`. Omit or `[]` if every listed beam should be acquired. |
 | `ALL_RI_IMAGE_REQUIRED` | If `true`, any required plan beam without a matching RI makes the case **Fail**. If `false` (default), pass/fail uses only acquired images; missing beams are labeled Missing but do not fail the case. | Set `true` only when every WL beam must be imaged. `IGNORE_BEAMS` (and CBCT by name) are never required. |
@@ -323,7 +360,6 @@ Each object under `MACHINES` is one linac (or cone mode). Edit in **Settings →
 | `CASE_FOLDER_NAME_REGEX` | Only folders whose names match are treated as cases. Default `^\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$`. | Different export naming (e.g. four-digit year). Empty/missing uses the default. |
 | `record_csv_file` | Append-only CSV of date, time, operator, max *d*, G/T/C. | Clinic share path for trending; leave blank to skip CSV. |
 | `new_case_email_to` | Optional extra IGRT-report addresses for this machine, added to **Notifications.email.new_case_email_to**. Empty = clinic list only. | Leave empty unless this linac needs extra people. |
-| `docuforms2_form_id` | DocuForms2 form id for post-analysis upload. Empty = skip this machine. | Edge `sb_edge_mlc_wl`, Edge_Cone `sb_edge_cone_wl`, TrueBeam `sb_truebeam_mlc_wl`. |
 
 ### Pass/fail and BB search
 

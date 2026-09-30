@@ -56,6 +56,7 @@ from .app_settings import (
     get_machines,
     is_simple_run_mode,
     load_gui_settings,
+    machine_case_roots,
     save_gui_settings,
     simple_machine_name,
 )
@@ -195,7 +196,7 @@ def _type_rank(kind: str) -> int:
 
 
 class ScanCasesWorker(QThread):
-    """List DATA_FOLDER case directories off the UI thread."""
+    """List WATCH_FOLDER then DATA_FOLDER case directories off the UI thread."""
 
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -732,13 +733,6 @@ class OpenCaseDialog(QDialog):
         _save_layout(self, self._settings, "open_case", self.splitter)
         super().done(result)
 
-    def _data_folder_path(self, machine: dict) -> Path | None:
-        text = str(machine.get("DATA_FOLDER") or "").strip()
-        if not text:
-            return None
-        path = Path(text).expanduser()
-        return path if path.is_dir() else None
-
     def _persist_data_folder(self, machine: dict, folder: str) -> None:
         machine["DATA_FOLDER"] = folder
         data = load_gui_settings()
@@ -752,15 +746,18 @@ class OpenCaseDialog(QDialog):
         save_gui_settings(data)
 
     def _ensure_data_folder(self, machine: dict) -> bool:
-        if self._data_folder_path(machine) is not None:
+        if machine_case_roots(machine):
             return True
         name = str(machine.get("NAME") or "this machine").strip()
-        current = str(machine.get("DATA_FOLDER") or "").strip() or "(not set)"
+        watch = str(machine.get("WATCH_FOLDER") or "").strip() or "(not set)"
+        data = str(machine.get("DATA_FOLDER") or "").strip() or "(not set)"
         QMessageBox.warning(
             self,
-            "Data folder",
-            f"DATA_FOLDER for {name} is missing or does not exist:\n{current}\n\n"
-            "Please choose the Data folder for this machine.",
+            "Case folders",
+            f"No case folders found for {name}.\n\n"
+            f"WATCH_FOLDER:\n{watch}\n\n"
+            f"DATA_FOLDER:\n{data}\n\n"
+            "Please choose the archive DATA_FOLDER for this machine.",
         )
         start = str(machine.get("DATA_FOLDER") or "").strip()
         start_path = Path(start).expanduser() if start else Path()

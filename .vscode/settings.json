@@ -1,0 +1,8 @@
+{
+  "files.associations": {
+    "settings.json": "jsonc",
+    "settings.sample.json": "jsonc",
+    "winstonlutz.gui.settings.json": "jsonc",
+    "winstonlutz.gui.settings.sample.json": "jsonc"
+  }
+}

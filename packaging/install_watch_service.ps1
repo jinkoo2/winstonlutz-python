@@ -3,7 +3,9 @@
 
 param(
     [string]$ServiceName = "WinstonLutzWatch",
+    [string]$ProgramExe = "",
     [string]$PythonExe = "",
+    [string]$AppParameters = "",
     [string]$AppDirectory = "",
     [string]$SettingsFile = ""
 )
@@ -11,14 +13,52 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $AppDirectory) { $AppDirectory = $root }
-if (-not $SettingsFile) { $SettingsFile = Join-Path $AppDirectory "winstonlutz.gui.settings.json" }
-
-if (-not $PythonExe) {
-    $conda = Join-Path $env:LOCALAPPDATA "anaconda3\envs\winstonlutz\python.exe"
-    if (Test-Path $conda) {
-        $PythonExe = $conda
+if (-not $SettingsFile) {
+    $canonical = Join-Path $AppDirectory "settings.json"
+    $legacy = Join-Path $AppDirectory "winstonlutz.gui.settings.json"
+    if (Test-Path $canonical) {
+        $SettingsFile = $canonical
+    } elseif (Test-Path $legacy) {
+        $SettingsFile = $legacy
     } else {
-        $PythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+        $SettingsFile = $canonical
+    }
+}
+if (-not $ProgramExe) { $ProgramExe = $PythonExe }
+
+function Find-PackagedExe {
+    $nextToApp = Join-Path $AppDirectory "WinstonLutz.exe"
+    if (Test-Path $nextToApp) { return $nextToApp }
+    $dist = Join-Path $root "dist"
+    if (Test-Path $dist) {
+        $found = Get-ChildItem $dist -Filter "WinstonLutz*.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return ""
+}
+
+if (-not $ProgramExe) {
+    $packaged = Find-PackagedExe
+    if ($packaged) {
+        $ProgramExe = $packaged
+    } else {
+        $conda = Join-Path $env:LOCALAPPDATA "anaconda3\envs\winstonlutz\python.exe"
+        if (Test-Path $conda) {
+            $ProgramExe = $conda
+        } else {
+            $ProgramExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+        }
+    }
+}
+
+if (-not $AppParameters) {
+    $name = [IO.Path]::GetFileName($ProgramExe)
+    if ($name -like "python*") {
+        $AppParameters = "-u -m winstonlutz watch"
+    } else {
+        $AppParameters = "watch"
     }
 }
 
@@ -29,9 +69,9 @@ if (-not (Test-Path $logs)) {
 
 Write-Host "Install NSSM from https://nssm.cc then run these as Administrator:"
 Write-Host ""
-Write-Host "nssm install $ServiceName `"$PythonExe`""
+Write-Host "nssm install $ServiceName `"$ProgramExe`""
 Write-Host "nssm set $ServiceName AppDirectory `"$AppDirectory`""
-Write-Host "nssm set $ServiceName AppParameters `"-u -m winstonlutz watch`""
+Write-Host "nssm set $ServiceName AppParameters `"$AppParameters`""
 Write-Host "nssm set $ServiceName AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=$SettingsFile"
 Write-Host "nssm set $ServiceName DisplayName `"Winston-Lutz Watch`""
 Write-Host "nssm set $ServiceName Start SERVICE_AUTO_START"
@@ -42,6 +82,7 @@ Write-Host "nssm set $ServiceName ObjectName `"DOMAIN\service-account`" `"passwo
 Write-Host "nssm start $ServiceName"
 Write-Host ""
 Write-Host "Stop the C# WinstonLutzWindowsService first so both watchers do not run."
-Write-Host "Python: $PythonExe"
+Write-Host "Program: $ProgramExe"
+Write-Host "Arguments: $AppParameters"
 Write-Host "AppDirectory: $AppDirectory"
 Write-Host "Settings: $SettingsFile"

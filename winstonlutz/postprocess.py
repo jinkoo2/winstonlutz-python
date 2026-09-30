@@ -62,3 +62,13 @@ def run_post_processing(
                 context=f"postprocess.{kind}",
                 blocking=True,
             )
+            if kind == DOCUFORMS2_IGRT_TYPE:
+                from .docuforms_igrt import notify_docuforms_event
+
+                notify_docuforms_event(
+                    step,
+                    "failed",
+                    case_dir,
+                    machine_cfg,
+                    {"error": str(exc) or f"{kind} failed"},
+                )

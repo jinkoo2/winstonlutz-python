@@ -23,7 +23,7 @@ def test_folder_unavailable_reason_ok(tmp_path):
 def test_folder_unavailable_reason_file_not_dir(tmp_path):
     file = tmp_path / "not_a_dir"
     file.write_text("x", encoding="utf-8")
-    msg = folder_unavailable_reason(file, "data_root")
+    msg = folder_unavailable_reason(file, "winstonlutz_data_root")
     assert msg is not None
     assert "not a directory" in msg
 
@@ -146,25 +146,67 @@ def test_file_and_case_folder_rules(tmp_path):
         {
             "Watcher": {
                 "watch_path": r"\\share\QA",
-                "data_root": r"\\share\WL",
-                "file_patterns": "RE.*.dcm, *.ready",
-                "recursive": False,
-                "case_folder_regex": "",
-                "case_dir_levels": 2,
-                "poll_sec": 5,
+                "winstonlutz_data_root": r"\\share\WL",
+                "new_case_file_patterns": "RE.*.dcm, *.ready",
+                "watch_subfolders": False,
+                "case_folder_name_regex": "",
+                "machine_to_case_dir_levels": 2,
+                "queued_case_poll_sec": 5,
+                "disk_scan_for_new_case_detection": False,
+                "disk_scan_for_new_case_detection_sec": 120,
+                "archive_old_cases": False,
+                "archive_cases_older_than_days": 14,
+                "archive_old_cases_at": "02:30",
             }
         }
     )
-    assert cfg["recursive"] is False
-    assert cfg["file_patterns"] == ["RE.*.dcm", "*.ready"]
-    assert cfg["case_folder_regex"] == ""
-    assert cfg["case_dir_levels"] == 2
-    assert cfg["poll_sec"] == 5
+    assert cfg["watch_subfolders"] is False
+    assert cfg["new_case_file_patterns"] == ["RE.*.dcm", "*.ready"]
+    assert cfg["case_folder_name_regex"] == ""
+    assert cfg["machine_to_case_dir_levels"] == 2
+    assert cfg["queued_case_poll_sec"] == 5
+    assert cfg["disk_scan_for_new_case_detection"] is False
+    assert cfg["disk_scan_for_new_case_detection_sec"] == 120
+    assert cfg["archive_old_cases"] is False
+    assert cfg["archive_cases_older_than_days"] == 14
+    assert cfg["archive_old_cases_at"] == "02:30"
 
-    missing = watcher_settings({"Watcher": {"watch_path": "x", "data_root": "y"}})
-    assert missing["file_patterns"] == ["RE.*.dcm"]
-    assert missing["recursive"] is True
-    assert missing["case_folder_regex"] == DEFAULT_CASE_FOLDER_REGEX
+    missing = watcher_settings({"Watcher": {"watch_path": "x", "winstonlutz_data_root": "y"}})
+    assert missing["new_case_file_patterns"] == ["RE.*.dcm"]
+    assert missing["watch_subfolders"] is True
+    assert missing["case_folder_name_regex"] == DEFAULT_CASE_FOLDER_REGEX
+    assert missing["disk_scan_for_new_case_detection"] is True
+    assert missing["disk_scan_for_new_case_detection_sec"] == 60
+    assert missing["archive_old_cases"] is True
+    assert missing["archive_cases_older_than_days"] == 7
+    assert missing["archive_old_cases_at"] == "01:00"
+
+    legacy = watcher_settings(
+        {
+            "Watcher": {
+                "watch_path": "x",
+                "data_root": "y",
+                "recursive": False,
+                "file_patterns": ["RE.*.dcm"],
+                "case_folder_regex": "",
+                "case_dir_levels": 2,
+                "poll_sec": 5,
+                "disk_scan": False,
+                "disk_scan_sec": 120,
+                "archive": False,
+                "archive_age_days": 14,
+                "archive_at": "02:30",
+            }
+        }
+    )
+    assert legacy["winstonlutz_data_root"] == "y"
+    assert legacy["watch_subfolders"] is False
+    assert legacy["machine_to_case_dir_levels"] == 2
+    assert legacy["queued_case_poll_sec"] == 5
+    assert legacy["disk_scan_for_new_case_detection"] is False
+    assert legacy["archive_old_cases"] is False
+    assert legacy["archive_cases_older_than_days"] == 14
+    assert legacy["archive_old_cases_at"] == "02:30"
 
     queue: list[str] = []
     import threading
@@ -188,3 +230,60 @@ def test_file_and_case_folder_rules(tmp_path):
     other.mkdir()
     handler._maybe_queue(str(other / "RE.1.dcm"))
     assert queue == [str(case)]
+
+    busy = {str(case)}
+    queue.clear()
+    handler.busy = busy
+    handler._maybe_queue(str(case / "RE.3.dcm"))
+    assert queue == []
+
+
+def test_scan_unprocessed_cases_skips_report_and_young_files(tmp_path):
+    from winstonlutz.app_settings import DEFAULT_CASE_FOLDER_REGEX
+    from winstonlutz.watcher import scan_unprocessed_cases
+
+    edge = tmp_path / "Edge"
+    missed = edge / "26-09-30_06-27-37"
+    done = edge / "26-09-29_06-00-00"
+    young = edge / "26-09-30_07-00-00"
+    scratch = edge / "scratch"
+    missed.mkdir(parents=True)
+    done.mkdir(parents=True)
+    young.mkdir(parents=True)
+    scratch.mkdir()
+    (missed / "RE.1.dcm").write_bytes(b"x")
+    (done / "RE.1.dcm").write_bytes(b"x")
+    (done / "report.html").write_text("<html></html>", encoding="utf-8")
+    (young / "RE.1.dcm").write_bytes(b"x")
+    (scratch / "RE.1.dcm").write_bytes(b"x")
+    now = 1_000_000.0
+    import os
+
+    os.utime(missed / "RE.1.dcm", (now - 60, now - 60))
+    os.utime(young / "RE.1.dcm", (now - 5, now - 5))
+    found = scan_unprocessed_cases(
+        tmp_path,
+        file_patterns=["RE.*.dcm"],
+        case_folder_regex=DEFAULT_CASE_FOLDER_REGEX,
+        recursive=True,
+        min_age_sec=15,
+        now=now,
+    )
+    assert found == [missed]
+
+
+def test_scan_unprocessed_cases_direct_child(tmp_path):
+    from winstonlutz.app_settings import DEFAULT_CASE_FOLDER_REGEX
+    from winstonlutz.watcher import scan_unprocessed_cases
+
+    case = tmp_path / "26-09-30_06-27-37"
+    case.mkdir()
+    (case / "RE.1.dcm").write_bytes(b"x")
+    found = scan_unprocessed_cases(
+        tmp_path,
+        file_patterns=["RE.*.dcm"],
+        case_folder_regex=DEFAULT_CASE_FOLDER_REGEX,
+        recursive=False,
+        min_age_sec=0,
+    )
+    assert found == [case]

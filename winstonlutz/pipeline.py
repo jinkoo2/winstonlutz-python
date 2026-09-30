@@ -24,6 +24,7 @@ from .app_settings import (
     DEFAULT_CASE_FOLDER_REGEX,
     find_machine_by_name,
     find_machine_for_folder,
+    machine_case_roots,
     report_template_root,
     simple_machine_name,
 )
@@ -282,8 +283,6 @@ def _render_reports(
 
     if (tmpl_root / "full" / "item.html").is_file():
         one_report("full", "report.html")
-    if (tmpl_root / "short" / "item.html").is_file():
-        one_report("short", "report.short.html")
 
 
 def run_case(
@@ -444,21 +443,26 @@ def list_ri_files(folder: str | Path) -> list[Path]:
 
 
 def list_case_candidates(machine: dict) -> list[Path]:
-    """Case-named directories under DATA_FOLDER (no RI or result scan)."""
-    data = Path(str(machine.get("DATA_FOLDER") or "")).expanduser()
-    if not data.is_dir():
-        return []
+    """Case-named directories under WATCH_FOLDER then DATA_FOLDER (no RI scan).
+
+    Live watch copies win when the same case name exists in both folders.
+    """
     pattern = str(machine.get("CASE_FOLDER_NAME_REGEX") or "").strip() or DEFAULT_CASE_FOLDER_REGEX
     found: list[Path] = []
-    try:
-        with os.scandir(data) as it:
-            for entry in it:
-                if not re.fullmatch(pattern, entry.name):
-                    continue
-                if entry.is_dir(follow_symlinks=False):
-                    found.append(Path(entry.path))
-    except OSError:
-        return []
+    seen_names: set[str] = set()
+    for root in machine_case_roots(machine):
+        try:
+            with os.scandir(root) as it:
+                for entry in it:
+                    if entry.name in seen_names:
+                        continue
+                    if not re.fullmatch(pattern, entry.name):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        seen_names.add(entry.name)
+                        found.append(Path(entry.path))
+        except OSError:
+            continue
     found.sort(key=case_recency_key, reverse=True)
     return found
 
@@ -534,7 +538,7 @@ def case_open_status(folder: str | Path) -> str:
 
 
 def list_case_folders(machine: dict) -> list[Path]:
-    """Case directories under DATA_FOLDER that match the name regex and contain RI DICOMs."""
+    """Case directories under WATCH_FOLDER then DATA_FOLDER that contain RI DICOMs."""
     return [p for p in list_case_candidates(machine) if case_has_ri(p)]
 
 

@@ -6,8 +6,11 @@ import base64
 import json
 import logging
 import mimetypes
+import os
 import re
+import shutil
 import ssl
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -16,6 +19,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from .app_settings import form_id_for_machine
 from .models import WinstonLutzItem, calc_norm
 
 logger = logging.getLogger(__name__)
@@ -45,20 +49,32 @@ def round_table(t: int) -> int:
 
 
 def performed_at_from_case(case_dir: Path) -> datetime | None:
-    match = re.match(
-        r"(\d{2})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$", case_dir.name
-    )
-    if not match:
-        return None
-    try:
-        return datetime(
-            2000 + int(match.group(3)),
-            int(match.group(2)),
-            int(match.group(1)),
-            int(match.group(4)),
-            int(match.group(5)),
-            int(match.group(6)),
+    """Case time as YY-MM-DD_HH-MM-SS, or Date/Time from report.html if present."""
+    case_dir = Path(case_dir)
+    for name in ("report.html", "report.short.html"):
+        path = case_dir / name
+        try:
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read(16000)
+        except OSError:
+            continue
+        match = re.search(
+            r"Date/Time</span>\s*<input[^>]*\bvalue=\"([^\"]+)\"",
+            text,
+            re.IGNORECASE,
         )
+        if not match:
+            continue
+        raw = match.group(1).strip()
+        for fmt in ("%y/%m/%d %H:%M:%S", "%y/%m/%d %H:%M"):
+            try:
+                return datetime.strptime(raw, fmt)
+            except ValueError:
+                continue
+    try:
+        return datetime.strptime(case_dir.name, "%y-%m-%d_%H-%M-%S")
     except ValueError:
         return None
 
@@ -265,19 +281,126 @@ def zip_dicoms(case_dir: Path, dest: Path) -> bool:
 
 
 def html_to_pdf(html_path: Path, dest: Path) -> bool:
+    """Convert the full report.html to PDF (WeasyPrint, else Chrome/Edge)."""
+    html_path = Path(html_path)
+    dest = Path(dest)
+    if not html_path.is_file():
+        return False
+    try:
+        text = html_path.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("could not read %s for PDF", html_path)
+        return False
+    text = text.replace(".\\", "./").replace("\\", "/")
+    tmp_html = html_path.parent / f".{html_path.stem}.pdfsrc.html"
+    local_dir = None
+    try:
+        tmp_html.write_text(text, encoding="utf-8")
+        if _try_write_pdf(tmp_html, dest):
+            return True
+        local_html, local_dir = _local_pdf_workspace(html_path, text)
+        if local_html is not None and _try_write_pdf(local_html, dest):
+            return True
+    except Exception:
+        logger.warning("report.pdf conversion failed", exc_info=True)
+    finally:
+        try:
+            tmp_html.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if local_dir is not None:
+            shutil.rmtree(local_dir, ignore_errors=True)
+    logger.warning("report.pdf conversion failed for %s", html_path)
+    return False
+
+
+def _try_write_pdf(html_path: Path, dest: Path) -> bool:
+    if not (_pdf_weasyprint(html_path, dest) or _pdf_chromium(html_path, dest)):
+        return False
+    size = dest.stat().st_size if dest.is_file() else 0
+    if size <= 0:
+        return False
+    logger.info("created report.pdf (%s KB)", f"{size / 1024:.1f}")
+    return True
+
+
+def _local_pdf_workspace(html_path: Path, rewritten_html: str) -> tuple[Path | None, Path | None]:
+    """Copy rewritten HTML and result.png files to a local temp dir (UNC-safe)."""
+    try:
+        work = Path(tempfile.mkdtemp(prefix="wl_pdf_"))
+        dest_html = work / html_path.name
+        dest_html.write_text(rewritten_html, encoding="utf-8")
+        for png in html_path.parent.glob("*_out/result.png"):
+            out = work / png.parent.name
+            out.mkdir(exist_ok=True)
+            shutil.copy2(png, out / "result.png")
+        return dest_html, work
+    except OSError:
+        logger.warning("could not copy report assets for PDF", exc_info=True)
+        return None, None
+
+
+def _pdf_weasyprint(html_path: Path, dest: Path) -> bool:
     try:
         from weasyprint import HTML as WeasyHTML
     except ImportError:
-        logger.warning("weasyprint not installed; skipping report.pdf")
         return False
     try:
-        html = html_path.read_text(encoding="utf-8")
-        html = html.replace(".\\", "./").replace("\\", "/")
-        WeasyHTML(string=html, base_url=str(html_path.parent)).write_pdf(str(dest))
-        return dest.is_file()
+        WeasyHTML(string=html_path.read_text(encoding="utf-8"), base_url=str(html_path.parent)).write_pdf(str(dest))
     except Exception:
-        logger.warning("report.pdf conversion failed", exc_info=True)
+        logger.warning("weasyprint PDF failed", exc_info=True)
         return False
+    return dest.is_file() and dest.stat().st_size > 0
+
+
+def _chromium_exe() -> str | None:
+    roots = (
+        os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+        os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    )
+    rels = (
+        Path("Microsoft/Edge/Application/msedge.exe"),
+        Path("Google/Chrome/Application/chrome.exe"),
+    )
+    for root in roots:
+        if not root:
+            continue
+        for rel in rels:
+            path = Path(root) / rel
+            if path.is_file():
+                return str(path)
+    return shutil.which("msedge") or shutil.which("chrome") or shutil.which("chromium")
+
+
+def _pdf_chromium(html_path: Path, dest: Path) -> bool:
+    exe = _chromium_exe()
+    if not exe:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        try:
+            dest.unlink()
+        except OSError:
+            return False
+    cmd = [
+        exe,
+        "--headless",
+        "--disable-gpu",
+        "--no-pdf-header-footer",
+        f"--print-to-pdf={dest}",
+        html_path.resolve().as_uri(),
+    ]
+    try:
+        proc = subprocess.run(cmd, check=False, timeout=180, capture_output=True)
+    except Exception:
+        logger.warning("Chrome/Edge PDF conversion failed", exc_info=True)
+        return False
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")[:400]
+        logger.warning("Chrome/Edge PDF conversion failed: %s", err or proc.returncode)
+        return False
+    return True
 
 
 def submit_form(
@@ -316,6 +439,45 @@ def write_marker(case_dir: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def notify_docuforms_event(
+    step: dict | None,
+    status: str,
+    case_dir: Path,
+    machine_cfg: dict | None,
+    extra: dict | None = None,
+) -> None:
+    """Email success or failure lists for this DocuForms2 step."""
+    from .emailer import send_list_email
+
+    step = step or {}
+    if status in ("ok", "dry-run"):
+        to = step.get("email_success_event_to")
+    elif status == "failed":
+        to = step.get("email_failure_event_to")
+    else:
+        return
+    machine = str((machine_cfg or {}).get("NAME") or "").strip()
+    label = f"{machine}/{case_dir.name}" if machine else case_dir.name
+    lines = [
+        f"status={status}",
+        f"machine={machine}",
+        f"case={case_dir.name}",
+        f"path={case_dir}",
+    ]
+    for key, value in (extra or {}).items():
+        if value is None or str(value).strip() == "":
+            continue
+        lines.append(f"{key}={value}")
+    send_list_email(
+        to,
+        f"DocuForms2 {status}: {label}",
+        "\n".join(lines),
+        context="postprocess.docuforms2_igrt",
+        subject=f"Winston-Lutz DocuForms2 {status}: {label}"[:180],
+        blocking=True,
+    )
+
+
 def upload_case(
     case_dir: str | Path,
     items: list[WinstonLutzItem],
@@ -325,20 +487,32 @@ def upload_case(
     """Upload one case. Returns 'ok', 'skipped', or 'dry-run'. Raises on hard failure."""
     case_dir = Path(case_dir)
     step = step or {}
-    form_id = str((machine_cfg or {}).get("docuforms2_form_id") or "").strip()
+    form_id = form_id_for_machine(step, machine_cfg)
     backend = str(step.get("backend_url") or "").strip().rstrip("/")
     if not form_id:
-        logger.info("DocuForms2 skipped: no docuforms2_form_id for this machine")
+        logger.info("DocuForms2 skipped: no form_id for this machine")
+        notify_docuforms_event(
+            step, "skipped", case_dir, machine_cfg, {"reason": "no form_id"}
+        )
         return "skipped"
     if not backend:
         logger.info("DocuForms2 skipped: empty backend_url")
+        notify_docuforms_event(
+            step, "skipped", case_dir, machine_cfg, {"reason": "empty backend_url"}
+        )
         return "skipped"
     if not items:
         logger.info("DocuForms2 skipped: no analysis items in %s", case_dir)
+        notify_docuforms_event(
+            step, "skipped", case_dir, machine_cfg, {"reason": "no analysis items"}
+        )
         return "skipped"
     resubmit = bool(step.get("resubmit", False))
     if already_imported(case_dir) and not resubmit:
         logger.info("DocuForms2 skipped (already imported): %s", case_dir)
+        notify_docuforms_event(
+            step, "skipped", case_dir, machine_cfg, {"reason": "already imported"}
+        )
         return "skipped"
 
     tol = 1.0
@@ -366,16 +540,24 @@ def upload_case(
                 )
                 if info:
                     attachments.append(info)
-        if not dry_run and bool(step.get("attach_pdf", False)):
+        if not dry_run and bool(step.get("attach_pdf", True)):
             report = case_dir / "report.html"
-            if report.is_file():
-                tmp_pdf = Path(tempfile.gettempdir()) / f"wl_pdf_{case_dir.name}_{uuid.uuid4().hex}.pdf"
-                if html_to_pdf(report, tmp_pdf):
-                    info = upload_file(
-                        backend, tmp_pdf, "report.pdf", timeout=timeout, verify=verify
-                    )
-                    if info:
-                        attachments.append(info)
+            if not report.is_file():
+                raise RuntimeError(f"report.html missing in {case_dir}; cannot attach report.pdf")
+            tmp_pdf = Path(tempfile.gettempdir()) / f"wl_pdf_{case_dir.name}_{uuid.uuid4().hex}.pdf"
+            if not html_to_pdf(report, tmp_pdf):
+                raise RuntimeError("could not convert report.html to report.pdf")
+            case_pdf = case_dir / "report.pdf"
+            try:
+                shutil.copy2(tmp_pdf, case_pdf)
+            except OSError:
+                logger.warning("could not copy report.pdf into %s", case_dir)
+            info = upload_file(
+                backend, tmp_pdf, "report.pdf", timeout=timeout, verify=verify
+            )
+            if not info:
+                raise RuntimeError("report.pdf upload failed")
+            attachments.append(info)
         if dry_run:
             logger.info(
                 "DocuForms2 dry-run %s form=%s fields=%s result=%s",
@@ -384,8 +566,15 @@ def upload_case(
                 len(values),
                 result,
             )
+            notify_docuforms_event(
+                step,
+                "dry-run",
+                case_dir,
+                machine_cfg,
+                {"form_id": form_id, "backend_url": backend, "result": result},
+            )
             return "dry-run"
-        submit_form(
+        response = submit_form(
             backend,
             form_id,
             values,
@@ -395,16 +584,45 @@ def upload_case(
             timeout=timeout,
             verify=verify,
         )
+        submission_id = str((response or {}).get("_id") or (response or {}).get("id") or "")
         write_marker(
             case_dir,
             {
                 "form_id": form_id,
                 "backend_url": backend,
                 "result": result,
+                "performed_at": values.get("performed_at") or "",
+                "submission_id": submission_id,
                 "submitted_at": datetime.now().isoformat(timespec="seconds"),
+                "attachments": [
+                    a.get("originalName") for a in attachments if a.get("originalName")
+                ],
             },
         )
-        logger.info("DocuForms2 submitted %s to %s result=%s", case_dir.name, form_id, result)
+        logger.info(
+            "DocuForms2 submitted %s to %s result=%s performed_at=%s id=%s",
+            case_dir.name,
+            form_id,
+            result,
+            values.get("performed_at") or "",
+            submission_id,
+        )
+        notify_docuforms_event(
+            step,
+            "ok",
+            case_dir,
+            machine_cfg,
+            {
+                "form_id": form_id,
+                "backend_url": backend,
+                "result": result,
+                "performed_at": values.get("performed_at") or "",
+                "submission_id": submission_id,
+                "attachments": ",".join(
+                    a.get("originalName") or "" for a in attachments
+                ),
+            },
+        )
         return "ok"
     finally:
         for path in (tmp_zip, tmp_pdf):

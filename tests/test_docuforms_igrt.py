@@ -20,6 +20,8 @@ def test_round_angles():
     assert round_gantry(88) == 90
     assert round_table(315) == 310
     assert round_table(350) == 350
+    assert round_table(360) == 0
+    assert round_table(358) == 0
 
 
 def test_values_from_items_and_duplicates(tmp_path):

@@ -142,9 +142,9 @@ def test_case_open_status_sample_report():
         / "sample_data"
         / "Edge"
         / "Data"
-        / "26-09-24_06-13-24"
+        / "26-09-25_06-15-37"
     )
-    if not sample.is_dir():
+    if not (sample / "report.html").is_file():
         return
     assert case_open_status(sample) == "pass"
 

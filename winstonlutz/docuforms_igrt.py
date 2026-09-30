@@ -35,12 +35,13 @@ def round_gantry(g: int) -> int:
 
 
 def round_table(t: int) -> int:
-    if t > 345:
-        t = 0
-    return min(
+    """Snap couch angle to a form target. 350 is a real station; only 360 aliases to 0."""
+    t = ((int(t) % 360) + 360) % 360
+    nearest = min(
         TABLE_TARGETS,
-        key=lambda x: min(abs(t - x), abs(t - x + 360), abs(t - x - 360)),
+        key=lambda x: min(abs(t - (x % 360)), 360 - abs(t - (x % 360))),
     )
+    return 0 if nearest == 360 else nearest
 
 
 def performed_at_from_case(case_dir: Path) -> datetime | None:

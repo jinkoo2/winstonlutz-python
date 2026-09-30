@@ -87,11 +87,30 @@ def _has_stream_handler(root: logging.Logger) -> bool:
     return False
 
 
+def _stream_isatty(stream) -> bool:
+    check = getattr(stream, "isatty", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def ensure_stdio() -> None:
+    """PyInstaller ``--windowed`` sets ``sys.stdout`` / ``sys.stderr`` to ``None``."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8", errors="replace")
+
+
 def configure_logging(*, verbose: bool = False, console: bool | None = None) -> None:
     """Attach a daily file handler under ``_logs``. Failures are ignored.
 
     ``console`` defaults to True unless this is a frozen app with no TTY.
     """
+    ensure_stdio()
     env_level = _level_from_env()
     if verbose:
         level = logging.DEBUG
@@ -109,7 +128,7 @@ def configure_logging(*, verbose: bool = False, console: bool | None = None) -> 
 
     if console is None:
         frozen = bool(getattr(sys, "frozen", False))
-        console = (not frozen) or sys.stderr.isatty()
+        console = (not frozen) or _stream_isatty(sys.stderr) or _stream_isatty(sys.stdout)
     stream_obj = sys.stderr or sys.stdout
     if console and stream_obj is not None and not _has_stream_handler(root):
         stream = logging.StreamHandler(stream_obj)

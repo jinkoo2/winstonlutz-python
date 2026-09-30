@@ -24,6 +24,36 @@ def test_prune_old_logs(tmp_path):
     assert junk.is_file()
 
 
+def test_configure_logging_handles_none_stdio(tmp_path, monkeypatch):
+    import logging
+    import sys
+
+    from winstonlutz import logutil
+
+    monkeypatch.setattr(logutil, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        logutil.configure_logging()
+        logging.getLogger("winstonlutz.testlog").info("frozen-no-tty")
+        for handler in root.handlers:
+            handler.flush()
+        path = tmp_path / "_logs" / f"winstonlutz_{date.today().isoformat()}.log"
+        assert path.is_file()
+        assert "frozen-no-tty" in path.read_text(encoding="utf-8")
+    finally:
+        for handler in list(root.handlers):
+            if handler not in before:
+                root.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+
+
 def test_configure_logging_writes_daily_file(tmp_path, monkeypatch):
     import logging
 

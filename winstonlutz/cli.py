@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .analysis import analyze_image
-from .logutil import configure_logging
+from .logutil import configure_logging, ensure_stdio
 from .pipeline import run_case
 from .validate import validate_sample_data
 from .watcher import WatchPathUnavailable, watch
@@ -85,6 +85,7 @@ def prepare_argv(argv: list[str] | None = None) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_stdio()
     argv = prepare_argv(argv)
     parser = argparse.ArgumentParser(
         prog="WinstonLutz",

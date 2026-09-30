@@ -13,11 +13,9 @@ from .app_settings import SETTINGS_NAME, app_dir, user_config_path
 
 DEFAULT_SERVICE_NAME = "WinstonLutzWatch"
 DEFAULT_DISPLAY_NAME = "Winston-Lutz Watch"
-GUI_EXE_STEM = "WinstonLutz.gui"
-SERVICE_EXE_STEM = "WinstonLutz.service"
+APP_EXE_STEM = "WinstonLutz"
 SOURCE_APP_PARAMETERS = "-u -m winstonlutz watch"
-FROZEN_APP_PARAMETERS = "watch"
-# Source-install default; WinstonLutz.service.exe needs no extra arguments.
+FROZEN_APP_PARAMETERS = "--mode service"
 APP_PARAMETERS = SOURCE_APP_PARAMETERS
 
 
@@ -65,36 +63,32 @@ def program_basename(program_exe: str) -> str:
     return Path(text).name.lower()
 
 
-def is_service_exe(program_exe: str) -> bool:
+def is_packaged_exe(program_exe: str) -> bool:
     name = program_basename(program_exe)
-    return "winstonlutz.service" in name or (
-        name.startswith("winstonlutz") and "service" in name
-    )
+    return name.startswith("winstonlutz")
 
 
 def default_app_parameters(program_exe: str = "") -> str:
     name = program_basename(program_exe)
     if name.startswith("python"):
         return SOURCE_APP_PARAMETERS
-    if is_service_exe(program_exe):
-        return ""
-    if is_frozen() or name.startswith("winstonlutz"):
+    if is_frozen() or is_packaged_exe(program_exe):
         return FROZEN_APP_PARAMETERS
     return SOURCE_APP_PARAMETERS
 
 
-def find_packaged_service_exe(folder: Path | None = None) -> str:
-    """WinstonLutz.service next to the GUI, with or without ``.exe``.
+def find_packaged_exe(folder: Path | None = None) -> str:
+    """WinstonLutz next to the running app, with or without ``.exe``.
 
     Also accepts versioned release names such as
-    ``WinstonLutz.service-0.4.1-windows-x64.exe``.
+    ``WinstonLutz-0.5.0-windows-x64.exe``.
     """
     folder = folder or app_dir()
     suffix = _exe_suffix()
     exact = [
-        folder / f"{SERVICE_EXE_STEM}{suffix}",
-        folder / SERVICE_EXE_STEM,
-        folder / f"{SERVICE_EXE_STEM}.exe",
+        folder / f"{APP_EXE_STEM}{suffix}",
+        folder / APP_EXE_STEM,
+        folder / f"{APP_EXE_STEM}.exe",
     ]
     seen: set[Path] = set()
     for path in exact:
@@ -104,21 +98,22 @@ def find_packaged_service_exe(folder: Path | None = None) -> str:
         seen.add(resolved)
         if resolved.is_file():
             return str(resolved)
-    matches = [path for path in folder.glob(f"{SERVICE_EXE_STEM}-*") if path.is_file()]
+    matches = [path for path in folder.glob(f"{APP_EXE_STEM}-*") if path.is_file()]
     if matches:
         return str(max(matches, key=lambda path: path.stat().st_mtime))
     return ""
 
 
+def find_packaged_service_exe(folder: Path | None = None) -> str:
+    return find_packaged_exe(folder)
+
+
 def default_program_exe() -> str:
     if is_frozen():
         here = Path(sys.executable).resolve()
-        found = find_packaged_service_exe(here.parent)
-        if found:
-            return found
-        if is_service_exe(str(here)) and here.is_file():
+        if here.is_file():
             return str(here)
-        return ""
+        return find_packaged_exe(here.parent)
     exe = Path(sys.executable)
     if exe.is_file():
         return str(exe)

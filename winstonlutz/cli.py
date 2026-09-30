@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -12,9 +13,99 @@ from .pipeline import run_case
 from .validate import validate_sample_data
 from .watcher import WatchPathUnavailable, watch
 
+KNOWN_COMMANDS = {
+    "analyze-image",
+    "analyze",
+    "watch",
+    "service",
+    "validate-golden",
+    "gui",
+    "plan-beams",
+}
+PARENT_FLAGS = {"-v", "--verbose", "-h", "--help"}
+
+
+def _insert_command(tokens: list[str], command: str) -> list[str]:
+    i = 0
+    while i < len(tokens) and tokens[i] in PARENT_FLAGS:
+        i += 1
+    return tokens[:i] + [command] + tokens[i:]
+
+
+def prepare_argv(argv: list[str] | None = None) -> list[str]:
+    """Apply --settings / --mode, default to GUI, and alias service → watch."""
+    raw = list(sys.argv[1:] if argv is None else argv)
+    settings: str | None = None
+    mode: str | None = None
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        tok = raw[i]
+        if tok in ("--settings", "-s", "--config") and i + 1 < len(raw):
+            settings = raw[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--settings=") or tok.startswith("--config="):
+            settings = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok == "--mode" and i + 1 < len(raw):
+            mode = raw[i + 1].strip().lower()
+            i += 2
+            continue
+        if tok.startswith("--mode="):
+            mode = tok.split("=", 1)[1].strip().lower()
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    if settings:
+        path = Path(settings).expanduser()
+        try:
+            path = path.resolve()
+        except OSError:
+            pass
+        os.environ["WINSTONLUTZ_APP_CONFIG"] = str(path)
+    existing = next((tok for tok in out if tok in KNOWN_COMMANDS), None)
+    if existing == "service":
+        out = ["watch" if tok == "service" else tok for tok in out]
+        existing = "watch"
+    wanted: str | None = None
+    if mode in ("service", "watch"):
+        wanted = "watch"
+    elif mode == "gui":
+        wanted = "gui"
+    elif existing is None and not (out and out[0] in ("-h", "--help")):
+        wanted = "gui"
+    if wanted and existing is None:
+        out = _insert_command(out, wanted)
+    elif wanted and existing and existing != wanted:
+        out = [wanted if tok == existing else tok for tok in out]
+    return out
+
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="winstonlutz")
+    argv = prepare_argv(argv)
+    parser = argparse.ArgumentParser(
+        prog="WinstonLutz",
+        epilog=(
+            "With no command, opens the GUI. Use --mode service (or the 'watch' command) "
+            "for the folder watcher. --settings FILE (or -s / --config) selects settings.json; "
+            "if omitted, settings.json next to the executable is used."
+        ),
+    )
+    parser.add_argument(
+        "--settings",
+        "-s",
+        "--config",
+        metavar="FILE",
+        help="path to settings.json (default: next to this executable)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("gui", "service"),
+        help="gui (default) or service (folder watcher)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

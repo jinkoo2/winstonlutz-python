@@ -7,6 +7,10 @@ Python port of the C# Winston-Lutz IGRT watcher and the `winston_lutz_2d` ITK an
 ```
 conda activate winstonlutz
 
+python -m winstonlutz
+python -m winstonlutz --mode gui
+python -m winstonlutz --mode service
+python -m winstonlutz --settings path\to\settings.json
 python -m winstonlutz analyze-image path\to\RI.xxx.dcm
 python -m winstonlutz analyze path\to\YY-MM-DD_HH-MM-SS --data-root sample_data
 python -m winstonlutz validate-golden sample_data
@@ -16,6 +20,8 @@ python -m winstonlutz gui
 python -m winstonlutz gui path\to\folder\with\RI.dcm
 python -m winstonlutz plan-beams sample_data\Edge\Plan\RP.EdgeDryRun.WL.dcm
 ```
+
+Packaged `WinstonLutz.exe` uses the same flags. With no arguments it opens the GUI. `--mode service` (or `watch`) runs the folder watcher. `--settings FILE` (also `-s` / `--config`) selects `settings.json`; if omitted, `settings.json` next to the executable is used.
 
 ## Replace the C# Windows service
 
@@ -74,10 +80,10 @@ The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/R
 
 ### Cutover
 
-1. On the service PC, run packaged **WinstonLutz.service.exe** (or, from source, the `winstonlutz` conda env). Confirm watch:
+1. On the service PC, run packaged **WinstonLutz.exe --mode service** (or, from source, the `winstonlutz` conda env). Confirm watch:
 
    ```
-   WinstonLutz.service.exe
+   WinstonLutz.exe --mode service
    ```
 
    From source instead:
@@ -91,13 +97,14 @@ The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/R
 
 2. **services.msc**: stop **WinstonLutzWindowsService** (or whatever the C# service is named). Do not run C# and Python watchers at the same time — both would process the same case.
 
-3. On the service PC, **Settings → Watcher → Install Watcher as Service** (Windows only). The dialog asks for `nssm.exe`, the program (`WinstonLutz.service.exe` when packaged, `python.exe` from source), arguments (empty for the service exe, or `-u -m winstonlutz watch` from source), app folder, settings file, and the Windows account that can reach the UNC shares. Administrator is required. You can still install **NSSM** (https://nssm.cc) by hand.
+3. On the service PC, **Settings → Watcher → Install Watcher as Service** (Windows only). The dialog asks for `nssm.exe`, the program (`WinstonLutz.exe` when packaged, `python.exe` from source), arguments (`--mode service` for the packaged app, or `-u -m winstonlutz watch` from source), app folder, settings file, and the Windows account that can reach the UNC shares. Administrator is required. You can still install **NSSM** (https://nssm.cc) by hand.
 
-   Packaged (no separate Python). Keep `WinstonLutz.gui.exe`, `WinstonLutz.service.exe`, and `settings.json` in the same folder:
+   Packaged (no separate Python). Keep `WinstonLutz.exe` and `settings.json` in the same folder:
 
    ```
-   nssm install WinstonLutzWatch C:\Apps\WinstonLutz.service.exe
+   nssm install WinstonLutzWatch C:\Apps\WinstonLutz.exe
    nssm set WinstonLutzWatch AppDirectory C:\Apps
+   nssm set WinstonLutzWatch AppParameters "--mode service"
    nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=C:\Apps\settings.json
    nssm set WinstonLutzWatch DisplayName "Winston-Lutz Watch"
    nssm set WinstonLutzWatch Start SERVICE_AUTO_START
@@ -117,13 +124,13 @@ The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/R
    nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\settings.json
    ```
 
-   Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). For a packaged install, `AppDirectory` is the folder that holds `WinstonLutz.gui.exe`, `WinstonLutz.service.exe`, and `settings.json`. From source, it is the project folder so `python -m winstonlutz` can import the package.
+   Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). For a packaged install, `AppDirectory` is the folder that holds `WinstonLutz.exe` and `settings.json`. From source, it is the project folder so `python -m winstonlutz` can import the package.
 
 4. `nssm status WinstonLutzWatch` and check `_logs\winstonlutz_YYYY-MM-DD.log` plus the NSSM stdout/stderr files.
 
 5. After a real linac export, confirm analysis and the short-report email. Then set the C# service to **Disabled** (do not uninstall until you are satisfied).
 
-6. Keep using **WinstonLutz.gui.exe** (or `python -m winstonlutz gui`) on physicist PCs. That is review only; it does not replace the watcher. The Windows service runs **WinstonLutz.service.exe**.
+6. Keep using **WinstonLutz.exe** with no arguments (or `python -m winstonlutz`) on physicist PCs. That is review only; it does not replace the watcher. The Windows service runs the same `WinstonLutz.exe --mode service`.
 
 `packaging/install_watch_service.ps1` also prints the NSSM commands with paths filled in for this machine.
 
@@ -144,9 +151,9 @@ git push origin v0.1.1
 
 The tag must match `vMAJOR.MINOR.PATCH` (for example `v0.1.1`). Each release includes:
 
-- `WinstonLutz.gui-<version>-windows-x64.exe` and `WinstonLutz.service-<version>-windows-x64.exe`
-- `WinstonLutz.gui-<version>-linux-x64` and `WinstonLutz.service-<version>-linux-x64`
-- `WinstonLutz.gui-<version>-macos-arm64` and `WinstonLutz.service-<version>-macos-arm64` (Apple Silicon runner)
+- `WinstonLutz-<version>-windows-x64.exe`
+- `WinstonLutz-<version>-linux-x64`
+- `WinstonLutz-<version>-macos-arm64` (Apple Silicon runner)
 - `winstonlutz-<version>-py3-none-any.whl` and source tarball
 
 You can also run **Actions → Release → Run workflow** without a tag; that only uploads build artifacts, it does not create a GitHub Release.

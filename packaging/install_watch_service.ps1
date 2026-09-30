@@ -28,11 +28,12 @@ if (-not $ProgramExe) { $ProgramExe = $PythonExe }
 
 function Find-PackagedExe {
     $suffix = ".exe"
-    $nextToApp = Join-Path $AppDirectory "WinstonLutz.service$suffix"
+    $nextToApp = Join-Path $AppDirectory "WinstonLutz$suffix"
     if (Test-Path $nextToApp) { return $nextToApp }
     $dist = Join-Path $root "dist"
     if (Test-Path $dist) {
-        $found = Get-ChildItem $dist -Filter "WinstonLutz.service*" -ErrorAction SilentlyContinue |
+        $found = Get-ChildItem $dist -Filter "WinstonLutz*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "WinstonLutz.gui*" -and $_.Name -notlike "WinstonLutz.service*" } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($found) { return $found.FullName }
@@ -58,10 +59,8 @@ if (-not $AppParameters) {
     $name = [IO.Path]::GetFileName($ProgramExe)
     if ($name -like "python*") {
         $AppParameters = "-u -m winstonlutz watch"
-    } elseif ($name -like "WinstonLutz.service*") {
-        $AppParameters = ""
     } else {
-        $AppParameters = "watch"
+        $AppParameters = "--mode service"
     }
 }
 

@@ -1,5 +1,5 @@
 // Sample Winston-Lutz settings (JSONC: // and /* */ comments are allowed).
-// Copy to settings.json next to WinstonLutz.gui.exe and WinstonLutz.service.exe. Saving Settings in the GUI drops comments.
+// Copy to settings.json next to WinstonLutz.exe. Saving Settings in the GUI drops comments.
 {
   "Institution": "Your Institution",
   "RunMode": "Clinic",

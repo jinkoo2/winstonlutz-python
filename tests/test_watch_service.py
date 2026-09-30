@@ -113,3 +113,9 @@ def test_find_packaged_service_exe(tmp_path):
     service.write_bytes(b"")
     (tmp_path / "WinstonLutz.gui.exe").write_bytes(b"")
     assert Path(find_packaged_service_exe(tmp_path)) == service
+
+    posix = tmp_path / "posix"
+    posix.mkdir()
+    native = posix / "WinstonLutz.service"
+    native.write_bytes(b"")
+    assert Path(find_packaged_service_exe(posix)) == native

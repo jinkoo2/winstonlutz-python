@@ -84,13 +84,27 @@ def default_app_parameters(program_exe: str = "") -> str:
 
 
 def find_packaged_service_exe(folder: Path | None = None) -> str:
-    """WinstonLutz.service.exe next to the GUI, including versioned release names."""
+    """WinstonLutz.service next to the GUI, with or without ``.exe``.
+
+    Also accepts versioned release names such as
+    ``WinstonLutz.service-0.4.1-windows-x64.exe``.
+    """
     folder = folder or app_dir()
     suffix = _exe_suffix()
-    exact = folder / f"{SERVICE_EXE_STEM}{suffix}"
-    if exact.is_file():
-        return str(exact)
-    matches = [path for path in folder.glob(f"{SERVICE_EXE_STEM}-*{suffix}") if path.is_file()]
+    exact = [
+        folder / f"{SERVICE_EXE_STEM}{suffix}",
+        folder / SERVICE_EXE_STEM,
+        folder / f"{SERVICE_EXE_STEM}.exe",
+    ]
+    seen: set[Path] = set()
+    for path in exact:
+        resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return str(resolved)
+    matches = [path for path in folder.glob(f"{SERVICE_EXE_STEM}-*") if path.is_file()]
     if matches:
         return str(max(matches, key=lambda path: path.stat().st_mtime))
     return ""

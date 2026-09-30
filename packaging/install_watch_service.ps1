@@ -2,12 +2,13 @@
 # Does not install NSSM or change services. Run the printed nssm lines in an elevated prompt.
 
 param(
-    [string]$ServiceName = "WinstonLutzWatch",
+    [string]$ServiceName = "WinstonLutz",
     [string]$ProgramExe = "",
     [string]$PythonExe = "",
     [string]$AppParameters = "",
     [string]$AppDirectory = "",
-    [string]$SettingsFile = ""
+    [string]$SettingsFile = "",
+    [string]$UsersFolder = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,9 @@ if (-not $SettingsFile) {
     } else {
         $SettingsFile = $canonical
     }
+}
+if (-not $UsersFolder) {
+    $UsersFolder = Join-Path $AppDirectory "_users"
 }
 if (-not $ProgramExe) { $ProgramExe = $PythonExe }
 
@@ -76,8 +80,9 @@ Write-Host "nssm set $ServiceName AppDirectory `"$AppDirectory`""
 if ($AppParameters) {
     Write-Host "nssm set $ServiceName AppParameters `"$AppParameters`""
 }
-Write-Host "nssm set $ServiceName AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=$SettingsFile"
-Write-Host "nssm set $ServiceName DisplayName `"Winston-Lutz Watch`""
+$extraEnv = "WINSTONLUTZ_APP_CONFIG=$SettingsFile`nWINSTONLUTZ_USERS_DIR=$UsersFolder"
+Write-Host "nssm set $ServiceName AppEnvironmentExtra `"$extraEnv`""
+Write-Host "nssm set $ServiceName DisplayName `"WinstonLutz`""
 Write-Host "nssm set $ServiceName Start SERVICE_AUTO_START"
 Write-Host "nssm set $ServiceName AppStdout `"$(Join-Path $logs 'watch_stdout.log')`""
 Write-Host "nssm set $ServiceName AppStderr `"$(Join-Path $logs 'watch_stderr.log')`""
@@ -90,3 +95,4 @@ Write-Host "Program: $ProgramExe"
 Write-Host "Arguments: $AppParameters"
 Write-Host "AppDirectory: $AppDirectory"
 Write-Host "Settings: $SettingsFile"
+Write-Host "Users: $UsersFolder"

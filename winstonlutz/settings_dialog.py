@@ -399,6 +399,42 @@ class MachineForm(QWidget):
         return data
 
 
+class LogTextDialog(QDialog):
+    """Wide, scrollable log so NSSM output can be read and copied."""
+
+    def __init__(self, parent, title: str, summary: str, body: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumSize(720, 420)
+        self.resize(800, 520)
+        self._body = body or ""
+
+        summary_label = QLabel(summary)
+        summary_label.setWordWrap(True)
+
+        self.edit = QPlainTextEdit()
+        self.edit.setReadOnly(True)
+        self.edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.edit.setPlainText(self._body)
+        self.edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        copy_btn = QPushButton("Copy to clipboard")
+        copy_btn.clicked.connect(self._copy)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        buttons.addButton(copy_btn, QDialogButtonBox.ActionRole)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(summary_label)
+        layout.addWidget(self.edit, 1)
+        layout.addWidget(buttons)
+
+    def _copy(self) -> None:
+        QApplication.clipboard().setText(self._body)
+        self.edit.selectAll()
+
+
 class InstallWatchServiceDialog(QDialog):
     """Collect NSSM paths and the Windows account that can reach the UNC shares."""
 
@@ -416,6 +452,7 @@ class InstallWatchServiceDialog(QDialog):
         self.app_parameters = QLineEdit(plan.app_parameters)
         self.app_directory = QLineEdit(plan.app_directory)
         self.settings_file = QLineEdit(plan.settings_file)
+        self.users_folder = QLineEdit(plan.users_folder)
         self.use_account = QCheckBox("Log on as this account (needed for UNC share access)")
         self.use_account.setChecked(bool(plan.account))
         self.account = QLineEdit(plan.account)
@@ -439,6 +476,7 @@ class InstallWatchServiceDialog(QDialog):
         form.addRow("arguments", self.app_parameters)
         form.addRow("app_directory", self._path_row(self.app_directory, "dir"))
         form.addRow("settings_file", self._path_row(self.settings_file, "json"))
+        form.addRow("users_folder", self._path_row(self.users_folder, "dir"))
         form.addRow("", self.use_account)
         form.addRow("account", self.account)
         form.addRow("password", self.password)
@@ -456,9 +494,11 @@ class InstallWatchServiceDialog(QDialog):
             _hint_label(
                 "Installs the watcher with NSSM (https://nssm.cc). Packaged app: "
                 "WinstonLutz.exe --mode service (no separate Python). From source: "
-                "python.exe with -u -m winstonlutz watch. Use the same Windows account as "
-                "the old C# service so UNC shares work. Administrator rights are required. "
-                "Stop WinstonLutzWindowsService first so both watchers do not run."
+                "python.exe with -u -m winstonlutz watch. settings_file and users_folder "
+                "are passed to the service (do not put --settings or --users in arguments). "
+                "Use the same Windows account as the old C# service so UNC shares work. "
+                "Administrator rights are required. Stop WinstonLutzWindowsService first "
+                "so both watchers do not run."
             )
         )
         layout.addWidget(buttons)
@@ -511,6 +551,7 @@ class InstallWatchServiceDialog(QDialog):
             app_parameters=self.app_parameters.text().strip(),
             app_directory=self.app_directory.text().strip(),
             settings_file=self.settings_file.text().strip(),
+            users_folder=self.users_folder.text().strip(),
             account=self.account.text().strip() if self.use_account.isChecked() else "",
             password=self.password.text() if self.use_account.isChecked() else "",
             start_after=self.start_after.isChecked(),
@@ -900,9 +941,9 @@ class SettingsDialog(QDialog):
             return
         ok, log = install_watch_service(plan)
         if ok:
-            QMessageBox.information(self, "Watcher service", f"Service installed.\n\n{log}")
+            LogTextDialog(self, "Watcher service", "Service installed.", log).exec_()
         else:
-            QMessageBox.critical(self, "Watcher service", f"Install failed.\n\n{log}")
+            LogTextDialog(self, "Watcher service", "Install failed.", log).exec_()
 
     def _sync_archive_ui(self, *_args) -> None:
         enabled = self.watch_archive.isChecked()

@@ -99,36 +99,38 @@ The machine name is the **parent of the case folder** (`Edge/26-09-23_06-21-08/R
 
 2. **services.msc**: stop **WinstonLutzWindowsService** (or whatever the C# service is named). Do not run C# and Python watchers at the same time — both would process the same case.
 
-3. On the service PC, **Settings → Watcher → Install Watcher as Service** (Windows only). The dialog asks for `nssm.exe`, the program (`WinstonLutz.exe` when packaged, `python.exe` from source), arguments (`--mode service` for the packaged app, or `-u -m winstonlutz watch` from source), app folder, settings file, and the Windows account that can reach the UNC shares. Administrator is required. You can still install **NSSM** (https://nssm.cc) by hand.
+3. On the service PC, **Settings → Watcher → Install Watcher as Service** (Windows only). The dialog asks for `nssm.exe`, the program (`WinstonLutz.exe` when packaged, `python.exe` from source), arguments (`--mode service` for the packaged app, or `-u -m winstonlutz watch` from source), app folder, **settings_file**, **users_folder**, and the Windows account that can reach the UNC shares. Do not put `--settings` or `--users` in arguments. Administrator is required. You can still install **NSSM** (https://nssm.cc) by hand.
 
    Packaged (no separate Python). Keep `WinstonLutz.exe` and `settings.json` in the same folder:
 
    ```
-   nssm install WinstonLutzWatch C:\Apps\WinstonLutz.exe
-   nssm set WinstonLutzWatch AppDirectory C:\Apps
-   nssm set WinstonLutzWatch AppParameters "--mode service"
-   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=C:\Apps\settings.json
-   nssm set WinstonLutzWatch DisplayName "Winston-Lutz Watch"
-   nssm set WinstonLutzWatch Start SERVICE_AUTO_START
-   nssm set WinstonLutzWatch AppStdout C:\Apps\_logs\watch_stdout.log
-   nssm set WinstonLutzWatch AppStderr C:\Apps\_logs\watch_stderr.log
-   nssm set WinstonLutzWatch AppRotateFiles 1
-   nssm set WinstonLutzWatch ObjectName "DOMAIN\service-account" "password"
-   nssm start WinstonLutzWatch
+   nssm install WinstonLutz C:\Apps\WinstonLutz.exe
+   nssm set WinstonLutz AppDirectory C:\Apps
+   nssm set WinstonLutz AppParameters "--mode service"
+   nssm set WinstonLutz AppEnvironmentExtra "WINSTONLUTZ_APP_CONFIG=C:\Apps\settings.json
+WINSTONLUTZ_USERS_DIR=C:\Apps\_users"
+   nssm set WinstonLutz DisplayName "WinstonLutz"
+   nssm set WinstonLutz Start SERVICE_AUTO_START
+   nssm set WinstonLutz AppStdout C:\Apps\_logs\watch_stdout.log
+   nssm set WinstonLutz AppStderr C:\Apps\_logs\watch_stderr.log
+   nssm set WinstonLutz AppRotateFiles 1
+   nssm set WinstonLutz ObjectName "DOMAIN\service-account" "password"
+   nssm start WinstonLutz
    ```
 
    From source:
 
    ```
-   nssm install WinstonLutzWatch C:\Users\jkim20\AppData\Local\anaconda3\envs\winstonlutz\python.exe
-   nssm set WinstonLutzWatch AppDirectory D:\MachineQA\projects\winstonlutz
-   nssm set WinstonLutzWatch AppParameters "-u -m winstonlutz watch"
-   nssm set WinstonLutzWatch AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\settings.json
+   nssm install WinstonLutz C:\Users\jkim20\AppData\Local\anaconda3\envs\winstonlutz\python.exe
+   nssm set WinstonLutz AppDirectory D:\MachineQA\projects\winstonlutz
+   nssm set WinstonLutz AppParameters "-u -m winstonlutz watch"
+   nssm set WinstonLutz AppEnvironmentExtra "WINSTONLUTZ_APP_CONFIG=D:\MachineQA\projects\winstonlutz\settings.json
+WINSTONLUTZ_USERS_DIR=D:\MachineQA\projects\winstonlutz\_users"
    ```
 
    Set **ObjectName** to the same account as the C# service (needs **Log on as a service** plus read/write on both UNC shares). For a packaged install, `AppDirectory` is the folder that holds `WinstonLutz.exe` and `settings.json`. From source, it is the project folder so `python -m winstonlutz` can import the package.
 
-4. `nssm status WinstonLutzWatch` and check `_logs\winstonlutz_YYYY-MM-DD.log` plus the NSSM stdout/stderr files.
+4. `nssm status WinstonLutz` and check `_logs\winstonlutz_YYYY-MM-DD.log` plus the NSSM stdout/stderr files.
 
 5. After a real linac export, confirm analysis and the short-report email. Then set the C# service to **Disabled** (do not uninstall until you are satisfied).
 

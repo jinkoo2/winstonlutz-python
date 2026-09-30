@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .app_settings import SETTINGS_NAME, app_dir, user_config_path
+from .identity import users_dir
 
-DEFAULT_SERVICE_NAME = "WinstonLutzWatch"
-DEFAULT_DISPLAY_NAME = "Winston-Lutz Watch"
+DEFAULT_SERVICE_NAME = "WinstonLutz"
+DEFAULT_DISPLAY_NAME = "WinstonLutz"
 APP_EXE_STEM = "WinstonLutz"
 SOURCE_APP_PARAMETERS = "-u -m winstonlutz watch"
 FROZEN_APP_PARAMETERS = "--mode service"
@@ -28,6 +29,7 @@ class WatchServicePlan:
     app_parameters: str = ""
     app_directory: str = ""
     settings_file: str = ""
+    users_folder: str = ""
     account: str = ""
     password: str = ""
     start_after: bool = True
@@ -174,8 +176,21 @@ def default_plan() -> WatchServicePlan:
         app_parameters=default_app_parameters(program),
         app_directory=str(app),
         settings_file=str(settings if settings.is_file() else app / SETTINGS_NAME),
+        users_folder=str(users_dir()),
         account=default_account(),
     )
+
+
+def app_environment_extra(plan: WatchServicePlan) -> str:
+    """NSSM extra environment: settings file and users folder (newline-separated)."""
+    lines: list[str] = []
+    settings = plan.settings_file.strip()
+    if settings:
+        lines.append(f"WINSTONLUTZ_APP_CONFIG={settings}")
+    users = plan.users_folder.strip()
+    if users:
+        lines.append(f"WINSTONLUTZ_USERS_DIR={users}")
+    return "\n".join(lines)
 
 
 def log_paths(app_directory: str) -> tuple[str, str]:
@@ -189,11 +204,11 @@ def nssm_commands(plan: WatchServicePlan) -> list[list[str]]:
     nssm = plan.nssm_exe.strip() or "nssm"
     program_exe = plan.program_exe.strip()
     app_directory = plan.app_directory.strip()
-    settings_file = plan.settings_file.strip()
     parameters = plan.app_parameters.strip()
     if not parameters:
         parameters = default_app_parameters(program_exe)
     stdout_log, stderr_log = log_paths(app_directory)
+    extra_env = app_environment_extra(plan)
     commands: list[list[str]] = []
     if plan.replace_existing:
         commands.append([nssm, "stop", name])
@@ -202,9 +217,8 @@ def nssm_commands(plan: WatchServicePlan) -> list[list[str]]:
     commands.append([nssm, "set", name, "AppDirectory", app_directory])
     if parameters:
         commands.append([nssm, "set", name, "AppParameters", parameters])
-    commands.append(
-        [nssm, "set", name, "AppEnvironmentExtra", f"WINSTONLUTZ_APP_CONFIG={settings_file}"]
-    )
+    if extra_env:
+        commands.append([nssm, "set", name, "AppEnvironmentExtra", extra_env])
     commands.append(
         [nssm, "set", name, "DisplayName", plan.display_name.strip() or DEFAULT_DISPLAY_NAME]
     )
@@ -261,6 +275,16 @@ def install_watch_service(plan: WatchServicePlan) -> tuple[bool, str]:
     settings_file = Path(plan.settings_file.strip())
     if not settings_file.is_file():
         return False, f"Settings file was not found:\n{settings_file}"
+    users_text = plan.users_folder.strip()
+    if not users_text:
+        return False, "Users folder was not set."
+    users_folder = Path(users_text)
+    try:
+        users_folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return False, f"Could not create users folder {users_folder}: {exc}"
+    if not users_folder.is_dir():
+        return False, f"Users folder was not found:\n{users_folder}"
     logs = app_directory / "_logs"
     try:
         logs.mkdir(parents=True, exist_ok=True)

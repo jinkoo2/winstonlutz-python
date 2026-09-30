@@ -4,6 +4,7 @@ from winstonlutz.watch_service import (
     FROZEN_APP_PARAMETERS,
     SOURCE_APP_PARAMETERS,
     WatchServicePlan,
+    app_environment_extra,
     default_app_parameters,
     find_packaged_exe,
     format_nssm_commands,
@@ -19,6 +20,7 @@ def test_nssm_commands_hide_password_and_replace():
         app_parameters=SOURCE_APP_PARAMETERS,
         app_directory=r"D:\MachineQA\projects\winstonlutz",
         settings_file=r"D:\MachineQA\projects\winstonlutz\settings.json",
+        users_folder=r"D:\MachineQA\projects\winstonlutz\_users",
         account=r"CLINIC\physicssvc",
         password="secret",
         start_after=True,
@@ -46,6 +48,7 @@ def test_nssm_commands_local_system_skips_account():
         program_exe="python.exe",
         app_directory="D:\\app",
         settings_file="D:\\app\\settings.json",
+        users_folder="D:\\app\\_users",
         account="",
         replace_existing=False,
         start_after=False,
@@ -67,6 +70,7 @@ def test_nssm_commands_packaged_exe_uses_service_mode():
         app_parameters="",
         app_directory=r"C:\Apps",
         settings_file=r"C:\Apps\settings.json",
+        users_folder=r"C:\Apps\_users",
         replace_existing=False,
         start_after=False,
     )
@@ -74,11 +78,18 @@ def test_nssm_commands_packaged_exe_uses_service_mode():
     assert commands[0] == [
         r"C:\nssm\nssm.exe",
         "install",
-        "WinstonLutzWatch",
+        "WinstonLutz",
         r"C:\Apps\WinstonLutz.exe",
     ]
     assert any(
         len(args) > 4 and args[3] == "AppParameters" and args[4] == FROZEN_APP_PARAMETERS
+        for args in commands
+    )
+    extra = app_environment_extra(plan)
+    assert "WINSTONLUTZ_APP_CONFIG=C:\\Apps\\settings.json" in extra
+    assert "WINSTONLUTZ_USERS_DIR=C:\\Apps\\_users" in extra
+    assert any(
+        len(args) > 4 and args[3] == "AppEnvironmentExtra" and args[4] == extra
         for args in commands
     )
 

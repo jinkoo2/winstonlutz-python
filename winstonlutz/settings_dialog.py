@@ -966,7 +966,8 @@ class SettingsDialog(QDialog):
                 "Add redirect_uri exactly to Valid redirect URIs; use 127.0.0.1, not localhost "
                 "(http://127.0.0.1:17843/callback). Standard flow + PKCE S256. "
                 "registration_url is the Account Console ({issuer}/account/), not "
-                "/protocol/openid-connect/registrations. Profiles go under _users."
+                "/protocol/openid-connect/registrations. Profiles are JSON files in _users "
+                "next to the executable, or the folder given with --users."
             )
         )
         self._sync_identity_ui()

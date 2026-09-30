@@ -1,3 +1,15 @@
+def test_users_dir_defaults_next_to_exe(tmp_path, monkeypatch):
+    from winstonlutz.identity import USERS_DIRNAME, users_dir
+
+    monkeypatch.delenv("WINSTONLUTZ_USERS_DIR", raising=False)
+    monkeypatch.delenv("WINSTONLUTZ_APP_CONFIG", raising=False)
+    monkeypatch.setattr("winstonlutz.identity.app_dir", lambda: tmp_path)
+    assert users_dir() == tmp_path / USERS_DIRNAME
+    override = tmp_path / "shared"
+    monkeypatch.setenv("WINSTONLUTZ_USERS_DIR", str(override))
+    assert users_dir() == override.resolve()
+
+
 def test_identity_defaults_and_os_user(tmp_path, monkeypatch):
     from winstonlutz.app_settings import save_gui_settings
     from winstonlutz import identity as ident

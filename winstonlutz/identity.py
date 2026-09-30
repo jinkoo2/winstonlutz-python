@@ -10,7 +10,7 @@ import re
 import socket
 from pathlib import Path
 
-from .app_settings import app_dir, load_gui_settings, user_config_path
+from .app_settings import app_dir, load_gui_settings
 
 IDENTITY_KEY = "Identity"
 USER_ID_NONE = "None"
@@ -288,11 +288,15 @@ def session_operator(dicom_operator: str = "", data: dict | None = None) -> str:
 
 
 def users_dir() -> Path:
+    """Folder of per-user JSON profiles (``_users`` next to the executable by default)."""
     override = os.environ.get("WINSTONLUTZ_USERS_DIR", "").strip()
     if override:
-        return Path(override)
-    parent = user_config_path().parent if os.environ.get("WINSTONLUTZ_APP_CONFIG") else app_dir()
-    return parent / USERS_DIRNAME
+        path = Path(override).expanduser()
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+    return app_dir() / USERS_DIRNAME
 
 
 def user_profile_path(user_id: str) -> Path:

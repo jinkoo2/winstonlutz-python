@@ -87,7 +87,7 @@ def _has_stream_handler(root: logging.Logger) -> bool:
     return False
 
 
-def _stream_isatty(stream) -> bool:
+def stream_isatty(stream) -> bool:
     check = getattr(stream, "isatty", None)
     if check is None:
         return False
@@ -95,6 +95,24 @@ def _stream_isatty(stream) -> bool:
         return bool(check())
     except Exception:
         return False
+
+
+def attach_console_if_needed() -> None:
+    """Let ``--help`` print when a windowed frozen app has no console."""
+    if sys.platform != "win32":
+        return
+    if stream_isatty(sys.stdout) or stream_isatty(sys.stderr):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.AttachConsole(-1) and not kernel32.AllocConsole():
+            return
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+    except Exception:
+        return
 
 
 def ensure_stdio() -> None:
@@ -128,7 +146,7 @@ def configure_logging(*, verbose: bool = False, console: bool | None = None) -> 
 
     if console is None:
         frozen = bool(getattr(sys, "frozen", False))
-        console = (not frozen) or _stream_isatty(sys.stderr) or _stream_isatty(sys.stdout)
+        console = (not frozen) or stream_isatty(sys.stderr) or stream_isatty(sys.stdout)
     stream_obj = sys.stderr or sys.stdout
     if console and stream_obj is not None and not _has_stream_handler(root):
         stream = logging.StreamHandler(stream_obj)

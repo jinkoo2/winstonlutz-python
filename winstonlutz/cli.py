@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .analysis import analyze_image
-from .logutil import configure_logging, ensure_stdio
+from .logutil import attach_console_if_needed, configure_logging, ensure_stdio, stream_isatty
 from .pipeline import run_case
 from .validate import validate_sample_data
 from .watcher import WatchPathUnavailable, watch
@@ -32,10 +32,24 @@ def _insert_command(tokens: list[str], command: str) -> list[str]:
     return tokens[:i] + [command] + tokens[i:]
 
 
+def _env_path(value: str) -> str:
+    path = Path(value).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    return str(path)
+
+
+def wants_help(argv: list[str]) -> bool:
+    return any(tok in ("-h", "--help") or tok.startswith("--help") for tok in argv)
+
+
 def prepare_argv(argv: list[str] | None = None) -> list[str]:
-    """Apply --settings / --mode, default to GUI, and alias service → watch."""
+    """Apply --settings / --users / --mode, default to GUI, and alias service → watch."""
     raw = list(sys.argv[1:] if argv is None else argv)
     settings: str | None = None
+    users: str | None = None
     mode: str | None = None
     out: list[str] = []
     i = 0
@@ -49,6 +63,14 @@ def prepare_argv(argv: list[str] | None = None) -> list[str]:
             settings = tok.split("=", 1)[1]
             i += 1
             continue
+        if tok in ("--users", "--users-dir") and i + 1 < len(raw):
+            users = raw[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--users=") or tok.startswith("--users-dir="):
+            users = tok.split("=", 1)[1]
+            i += 1
+            continue
         if tok == "--mode" and i + 1 < len(raw):
             mode = raw[i + 1].strip().lower()
             i += 2
@@ -60,12 +82,9 @@ def prepare_argv(argv: list[str] | None = None) -> list[str]:
         out.append(tok)
         i += 1
     if settings:
-        path = Path(settings).expanduser()
-        try:
-            path = path.resolve()
-        except OSError:
-            pass
-        os.environ["WINSTONLUTZ_APP_CONFIG"] = str(path)
+        os.environ["WINSTONLUTZ_APP_CONFIG"] = _env_path(settings)
+    if users:
+        os.environ["WINSTONLUTZ_USERS_DIR"] = _env_path(users)
     existing = next((tok for tok in out if tok in KNOWN_COMMANDS), None)
     if existing == "service":
         out = ["watch" if tok == "service" else tok for tok in out]
@@ -85,14 +104,23 @@ def prepare_argv(argv: list[str] | None = None) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ensure_stdio()
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if wants_help(raw):
+        if getattr(sys, "frozen", False) and not stream_isatty(sys.stdout) and not stream_isatty(
+            sys.stderr
+        ):
+            attach_console_if_needed()
+    else:
+        ensure_stdio()
     argv = prepare_argv(argv)
     parser = argparse.ArgumentParser(
         prog="WinstonLutz",
         epilog=(
             "With no command, opens the GUI. Use --mode service (or the 'watch' command) "
             "for the folder watcher. --settings FILE (or -s / --config) selects settings.json; "
-            "if omitted, settings.json next to the executable is used."
+            "if omitted, settings.json next to the executable is used. "
+            "--users DIR is the folder of per-user JSON profiles; if omitted, _users next to "
+            "the executable is used. -h / --help prints this message."
         ),
     )
     parser.add_argument(
@@ -101,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         metavar="FILE",
         help="path to settings.json (default: next to this executable)",
+    )
+    parser.add_argument(
+        "--users",
+        "--users-dir",
+        metavar="DIR",
+        help="folder for per-user JSON profiles (default: _users next to this executable)",
     )
     parser.add_argument(
         "--mode",

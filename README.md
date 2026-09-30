@@ -7,10 +7,12 @@ Python port of the C# Winston-Lutz IGRT watcher and the `winston_lutz_2d` ITK an
 ```
 conda activate winstonlutz
 
+python -m winstonlutz --help
 python -m winstonlutz
 python -m winstonlutz --mode gui
 python -m winstonlutz --mode service
 python -m winstonlutz --settings path\to\settings.json
+python -m winstonlutz --users path\to\_users
 python -m winstonlutz analyze-image path\to\RI.xxx.dcm
 python -m winstonlutz analyze path\to\YY-MM-DD_HH-MM-SS --data-root sample_data
 python -m winstonlutz validate-golden sample_data
@@ -21,7 +23,7 @@ python -m winstonlutz gui path\to\folder\with\RI.dcm
 python -m winstonlutz plan-beams sample_data\Edge\Plan\RP.EdgeDryRun.WL.dcm
 ```
 
-Packaged `WinstonLutz.exe` uses the same flags. With no arguments it opens the GUI. `--mode service` (or `watch`) runs the folder watcher. `--settings FILE` (also `-s` / `--config`) selects `settings.json`; if omitted, `settings.json` next to the executable is used.
+Packaged `WinstonLutz.exe` uses the same flags. With no arguments it opens the GUI. `--mode service` (or `watch`) runs the folder watcher. `--settings FILE` (also `-s` / `--config`) selects `settings.json`; if omitted, `settings.json` next to the executable is used. `--users DIR` (also `--users-dir`) is the folder of per-user JSON files; if omitted, `_users` next to the executable is used. `-h` / `--help` prints the command line. From a Command Prompt, `WinstonLutz.exe --help` shows the same text; a windowed double-click has no console unless you pass `--help`.
 
 ## Replace the C# Windows service
 
@@ -288,7 +290,7 @@ Keycloak 26 rejects that URL because `account-console` requires `code_challenge_
 
 The main window has a heading across the top: app name, institution, **current user** (name and email), **User settings**, and **Login** / **Logout** (OIDC only). OSUser has no login/logout; the OS person is already the user.
 
-**User settings** (per profile under `_users/`):
+**User settings** (per profile JSON under `_users/` next to the exe, or `--users`):
 
 | Field | Meaning |
 |---|---|

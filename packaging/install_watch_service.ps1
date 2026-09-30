@@ -27,11 +27,12 @@ if (-not $SettingsFile) {
 if (-not $ProgramExe) { $ProgramExe = $PythonExe }
 
 function Find-PackagedExe {
-    $nextToApp = Join-Path $AppDirectory "WinstonLutz.exe"
+    $suffix = ".exe"
+    $nextToApp = Join-Path $AppDirectory "WinstonLutz.service$suffix"
     if (Test-Path $nextToApp) { return $nextToApp }
     $dist = Join-Path $root "dist"
     if (Test-Path $dist) {
-        $found = Get-ChildItem $dist -Filter "WinstonLutz*.exe" -ErrorAction SilentlyContinue |
+        $found = Get-ChildItem $dist -Filter "WinstonLutz.service*" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($found) { return $found.FullName }
@@ -57,6 +58,8 @@ if (-not $AppParameters) {
     $name = [IO.Path]::GetFileName($ProgramExe)
     if ($name -like "python*") {
         $AppParameters = "-u -m winstonlutz watch"
+    } elseif ($name -like "WinstonLutz.service*") {
+        $AppParameters = ""
     } else {
         $AppParameters = "watch"
     }
@@ -71,7 +74,9 @@ Write-Host "Install NSSM from https://nssm.cc then run these as Administrator:"
 Write-Host ""
 Write-Host "nssm install $ServiceName `"$ProgramExe`""
 Write-Host "nssm set $ServiceName AppDirectory `"$AppDirectory`""
-Write-Host "nssm set $ServiceName AppParameters `"$AppParameters`""
+if ($AppParameters) {
+    Write-Host "nssm set $ServiceName AppParameters `"$AppParameters`""
+}
 Write-Host "nssm set $ServiceName AppEnvironmentExtra WINSTONLUTZ_APP_CONFIG=$SettingsFile"
 Write-Host "nssm set $ServiceName DisplayName `"Winston-Lutz Watch`""
 Write-Host "nssm set $ServiceName Start SERVICE_AUTO_START"

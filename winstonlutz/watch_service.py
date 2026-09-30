@@ -13,9 +13,11 @@ from .app_settings import SETTINGS_NAME, app_dir, user_config_path
 
 DEFAULT_SERVICE_NAME = "WinstonLutzWatch"
 DEFAULT_DISPLAY_NAME = "Winston-Lutz Watch"
+GUI_EXE_STEM = "WinstonLutz.gui"
+SERVICE_EXE_STEM = "WinstonLutz.service"
 SOURCE_APP_PARAMETERS = "-u -m winstonlutz watch"
 FROZEN_APP_PARAMETERS = "watch"
-# Source-install default; packaged installs use FROZEN_APP_PARAMETERS.
+# Source-install default; WinstonLutz.service.exe needs no extra arguments.
 APP_PARAMETERS = SOURCE_APP_PARAMETERS
 
 
@@ -53,21 +55,59 @@ def is_admin() -> bool:
         return False
 
 
+def _exe_suffix() -> str:
+    return ".exe" if os.name == "nt" else ""
+
+
+def program_basename(program_exe: str) -> str:
+    """File name of *program_exe*, including Windows paths on POSIX Python."""
+    text = str(program_exe or "").replace("\\", "/").rstrip("/")
+    return Path(text).name.lower()
+
+
+def is_service_exe(program_exe: str) -> bool:
+    name = program_basename(program_exe)
+    return "winstonlutz.service" in name or (
+        name.startswith("winstonlutz") and "service" in name
+    )
+
+
 def default_app_parameters(program_exe: str = "") -> str:
-    name = Path(program_exe or "").name.lower()
+    name = program_basename(program_exe)
     if name.startswith("python"):
         return SOURCE_APP_PARAMETERS
+    if is_service_exe(program_exe):
+        return ""
     if is_frozen() or name.startswith("winstonlutz"):
         return FROZEN_APP_PARAMETERS
     return SOURCE_APP_PARAMETERS
 
 
+def find_packaged_service_exe(folder: Path | None = None) -> str:
+    """WinstonLutz.service.exe next to the GUI, including versioned release names."""
+    folder = folder or app_dir()
+    suffix = _exe_suffix()
+    exact = folder / f"{SERVICE_EXE_STEM}{suffix}"
+    if exact.is_file():
+        return str(exact)
+    matches = [path for path in folder.glob(f"{SERVICE_EXE_STEM}-*{suffix}") if path.is_file()]
+    if matches:
+        return str(max(matches, key=lambda path: path.stat().st_mtime))
+    return ""
+
+
 def default_program_exe() -> str:
+    if is_frozen():
+        here = Path(sys.executable).resolve()
+        found = find_packaged_service_exe(here.parent)
+        if found:
+            return found
+        if is_service_exe(str(here)) and here.is_file():
+            return str(here)
+        return ""
     exe = Path(sys.executable)
     if exe.is_file():
         return str(exe)
-    if is_frozen():
-        return ""
     local = os.environ.get("LOCALAPPDATA", "").strip()
     if local:
         conda = Path(local) / "anaconda3" / "envs" / "winstonlutz" / "python.exe"
@@ -141,7 +181,9 @@ def nssm_commands(plan: WatchServicePlan) -> list[list[str]]:
     program_exe = plan.program_exe.strip()
     app_directory = plan.app_directory.strip()
     settings_file = plan.settings_file.strip()
-    parameters = plan.app_parameters.strip() or default_app_parameters(program_exe)
+    parameters = plan.app_parameters.strip()
+    if not parameters:
+        parameters = default_app_parameters(program_exe)
     stdout_log, stderr_log = log_paths(app_directory)
     commands: list[list[str]] = []
     if plan.replace_existing:
@@ -149,7 +191,8 @@ def nssm_commands(plan: WatchServicePlan) -> list[list[str]]:
         commands.append([nssm, "remove", name, "confirm"])
     commands.append([nssm, "install", name, program_exe])
     commands.append([nssm, "set", name, "AppDirectory", app_directory])
-    commands.append([nssm, "set", name, "AppParameters", parameters])
+    if parameters:
+        commands.append([nssm, "set", name, "AppParameters", parameters])
     commands.append(
         [nssm, "set", name, "AppEnvironmentExtra", f"WINSTONLUTZ_APP_CONFIG={settings_file}"]
     )

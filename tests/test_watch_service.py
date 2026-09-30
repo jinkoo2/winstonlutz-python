@@ -1,8 +1,11 @@
+from pathlib import Path
+
 from winstonlutz.watch_service import (
     FROZEN_APP_PARAMETERS,
     SOURCE_APP_PARAMETERS,
     WatchServicePlan,
     default_app_parameters,
+    find_packaged_service_exe,
     format_nssm_commands,
     nssm_commands,
 )
@@ -57,11 +60,11 @@ def test_nssm_commands_local_system_skips_account():
     )
 
 
-def test_nssm_commands_packaged_exe_uses_watch():
+def test_nssm_commands_service_exe_needs_no_arguments():
     plan = WatchServicePlan(
         nssm_exe=r"C:\nssm\nssm.exe",
-        program_exe=r"C:\Apps\WinstonLutz.exe",
-        app_parameters=FROZEN_APP_PARAMETERS,
+        program_exe=r"C:\Apps\WinstonLutz.service.exe",
+        app_parameters="",
         app_directory=r"C:\Apps",
         settings_file=r"C:\Apps\settings.json",
         replace_existing=False,
@@ -72,8 +75,22 @@ def test_nssm_commands_packaged_exe_uses_watch():
         r"C:\nssm\nssm.exe",
         "install",
         "WinstonLutzWatch",
-        r"C:\Apps\WinstonLutz.exe",
+        r"C:\Apps\WinstonLutz.service.exe",
     ]
+    assert not any(len(args) > 3 and args[3] == "AppParameters" for args in commands)
+
+
+def test_nssm_commands_legacy_combined_exe_uses_watch():
+    plan = WatchServicePlan(
+        nssm_exe=r"C:\nssm\nssm.exe",
+        program_exe=r"C:\Apps\WinstonLutz.exe",
+        app_parameters=FROZEN_APP_PARAMETERS,
+        app_directory=r"C:\Apps",
+        settings_file=r"C:\Apps\settings.json",
+        replace_existing=False,
+        start_after=False,
+    )
+    commands = nssm_commands(plan)
     assert any(
         len(args) > 4 and args[3] == "AppParameters" and args[4] == "watch" for args in commands
     )
@@ -81,5 +98,18 @@ def test_nssm_commands_packaged_exe_uses_watch():
 
 def test_default_app_parameters_from_program_name():
     assert default_app_parameters(r"C:\py\python.exe") == SOURCE_APP_PARAMETERS
+    assert default_app_parameters("/usr/bin/python3") == SOURCE_APP_PARAMETERS
+    assert default_app_parameters(r"C:\Apps\WinstonLutz.service.exe") == ""
+    assert default_app_parameters(r"C:\Apps\WinstonLutz.service-0.4.0-windows-x64.exe") == ""
+    assert default_app_parameters("/opt/WinstonLutz.service") == ""
+    assert default_app_parameters(r"C:\Apps\WinstonLutz.gui.exe") == FROZEN_APP_PARAMETERS
     assert default_app_parameters(r"C:\Apps\WinstonLutz.exe") == FROZEN_APP_PARAMETERS
     assert default_app_parameters(r"C:\Apps\WinstonLutz-0.3.0-windows-x64.exe") == FROZEN_APP_PARAMETERS
+
+
+def test_find_packaged_service_exe(tmp_path):
+    assert find_packaged_service_exe(tmp_path) == ""
+    service = tmp_path / "WinstonLutz.service.exe"
+    service.write_bytes(b"")
+    (tmp_path / "WinstonLutz.gui.exe").write_bytes(b"")
+    assert Path(find_packaged_service_exe(tmp_path)) == service

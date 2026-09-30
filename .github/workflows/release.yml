@@ -86,7 +86,8 @@ jobs:
         with:
           name: WinstonLutz-${{ matrix.os }}
           path: |
-            dist/WinstonLutz-*
+            dist/WinstonLutz.gui*
+            dist/WinstonLutz.service*
           if-no-files-found: error
 
   python-package:

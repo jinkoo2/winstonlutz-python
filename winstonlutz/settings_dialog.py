@@ -455,7 +455,7 @@ class InstallWatchServiceDialog(QDialog):
         layout.addWidget(
             _hint_label(
                 "Installs the watcher with NSSM (https://nssm.cc). Packaged app: "
-                "WinstonLutz.exe with arguments watch (no separate Python). From source: "
+                "WinstonLutz.service.exe (no extra arguments, no separate Python). From source: "
                 "python.exe with -u -m winstonlutz watch. Use the same Windows account as "
                 "the old C# service so UNC shares work. Administrator rights are required. "
                 "Stop WinstonLutzWindowsService first so both watchers do not run."
@@ -830,7 +830,7 @@ class SettingsDialog(QDialog):
         root.addLayout(form)
         root.addWidget(
             _hint_label(
-                "Used by WinstonLutz.exe watch or python -m winstonlutz watch "
+                "Used by WinstonLutz.service.exe or python -m winstonlutz watch "
                 "(Windows service via NSSM), not the GUI. "
                 "new_case_file_patterns are filename globs (one per line); default RE.*.dcm. "
                 "watch_subfolders watches machine/case subfolders. "

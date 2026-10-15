@@ -7,8 +7,10 @@ Clinic SMTP lives under Notifications.email. Window/level and view style stay in
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SETTINGS_NAME = "settings.json"
@@ -47,6 +49,7 @@ DEFAULT_WATCH_DISK_SCAN_SEC = 60.0
 DEFAULT_WATCH_ARCHIVE = True
 DEFAULT_WATCH_ARCHIVE_AGE_DAYS = 7
 DEFAULT_WATCH_ARCHIVE_AT = "01:00"
+DEFAULT_WATCH_MAX_CONCURRENT_CASES = 2
 # Canonical Watcher JSON keys, with older names still accepted when reading.
 WATCHER_SETTING_ALIASES = {
     "winstonlutz_data_root": ("data_root",),
@@ -328,7 +331,7 @@ def default_docuforms2_igrt_step() -> dict:
     return {
         "type": DOCUFORMS2_IGRT_TYPE,
         "enabled": True,
-        "backend_url": "https://roweb3.uhmc.sbuh.stonybrook.edu:9001",
+        "backend_url": "https://docuforms.example.edu:9001",
         "verify_ssl": False,
         "dry_run": False,
         "attach_dcm_zip": True,
@@ -700,3 +703,154 @@ def report_template_root(machine: dict) -> Path | None:
     if path.is_dir():
         return path
     return None
+
+
+class SettingsPathUnavailable(RuntimeError):
+    """Required settings.json folder or file is missing at startup."""
+
+
+@dataclass(frozen=True)
+class SettingsPathCheck:
+    label: str
+    path: str
+    kind: str
+    required: bool
+    ok: bool
+
+    @property
+    def empty(self) -> bool:
+        return not str(self.path or "").strip()
+
+    @property
+    def status(self) -> str:
+        if self.empty:
+            return "empty"
+        return "ok" if self.ok else "missing"
+
+
+def _path_exists(path: Path, kind: str) -> bool:
+    try:
+        return path.is_dir() if kind == "dir" else path.is_file()
+    except OSError:
+        return False
+
+
+def _settings_path_check(label: str, raw, kind: str, required: bool) -> SettingsPathCheck | None:
+    text = str(raw or "").strip()
+    if not text:
+        if required:
+            return SettingsPathCheck(label, "", kind, True, False)
+        return None
+    path = Path(text).expanduser()
+    return SettingsPathCheck(label, str(path), kind, required, _path_exists(path, kind))
+
+
+def collect_settings_path_checks(
+    data: dict | None = None,
+    *,
+    watch_path: str | Path | None = None,
+    data_root: str | Path | None = None,
+    role: str = "gui",
+) -> list[SettingsPathCheck]:
+    """Folders and files from settings.json that the app or watcher needs."""
+    settings = data if data is not None else load_gui_settings()
+    clinic = not is_simple_run_mode(settings)
+    require_watcher = role == "watch" or clinic
+    checks: list[SettingsPathCheck] = []
+
+    cfg = user_config_path()
+    checks.append(SettingsPathCheck("settings.json", str(cfg), "file", role != "watch", cfg.is_file()))
+
+    watcher = watcher_settings(settings)
+    effective_watch = watch_path if watch_path is not None else watcher.get("watch_path")
+    item = _settings_path_check("Watcher.watch_path", effective_watch, "dir", require_watcher)
+    if item:
+        checks.append(item)
+    effective_root = data_root if data_root is not None else watcher.get("winstonlutz_data_root")
+    item = _settings_path_check(
+        "Watcher.winstonlutz_data_root",
+        effective_root,
+        "dir",
+        require_watcher,
+    )
+    if item:
+        checks.append(item)
+
+    for machine in named_machines((settings or {}).get(MACHINES_KEY)):
+        name = str(machine.get("NAME") or "").strip() or "?"
+        prefix = f"MACHINES[{name}]"
+        for key in ("WATCH_FOLDER", "DATA_FOLDER"):
+            raw = machine.get(key)
+            item = _settings_path_check(
+                f"{prefix}.{key}",
+                raw,
+                "dir",
+                require_watcher and bool(str(raw or "").strip()),
+            )
+            if item:
+                checks.append(item)
+        item = _settings_path_check(
+            f"{prefix}.REPORT_TEMPLATE_FILE_PATH",
+            machine.get("REPORT_TEMPLATE_FILE_PATH"),
+            "file",
+            False,
+        )
+        if item:
+            checks.append(item)
+        item = _settings_path_check(
+            f"{prefix}.DICOM_PLAN_FILE",
+            machine.get("DICOM_PLAN_FILE"),
+            "file",
+            False,
+        )
+        if item:
+            checks.append(item)
+    return checks
+
+
+def missing_settings_paths(checks: list[SettingsPathCheck], *, required_only: bool = False) -> list[SettingsPathCheck]:
+    return [c for c in checks if not c.ok and (c.required or not required_only)]
+
+
+def format_settings_path_report(checks: list[SettingsPathCheck]) -> str:
+    lines = ["Checked settings folders and files:"]
+    for check in checks:
+        lines.append(f"  {check.status.upper():<8} {check.label}")
+        lines.append(f"           {check.path or '(empty)'}")
+    return "\n".join(lines)
+
+
+def log_settings_path_checks(
+    checks: list[SettingsPathCheck],
+    log: logging.Logger | None = None,
+) -> None:
+    log = log or logging.getLogger(__name__)
+    for check in checks:
+        message = f"{check.label}: {check.path or '(empty)'}"
+        if check.ok:
+            log.info("settings path ok: %s", message)
+        elif check.required:
+            log.error("settings path missing: %s", message)
+        else:
+            log.warning("settings path missing: %s", message)
+
+
+def check_settings_paths(
+    data: dict | None = None,
+    *,
+    watch_path: str | Path | None = None,
+    data_root: str | Path | None = None,
+    role: str = "gui",
+    require: bool = False,
+    log: logging.Logger | None = None,
+) -> list[SettingsPathCheck]:
+    """Log configured paths. ``require=True`` raises if a required path is missing."""
+    checks = collect_settings_path_checks(
+        data, watch_path=watch_path, data_root=data_root, role=role
+    )
+    log_settings_path_checks(checks, log)
+    if require:
+        missing = missing_settings_paths(checks, required_only=True)
+        if missing:
+            raise SettingsPathUnavailable(format_settings_path_report(checks))
+    return checks

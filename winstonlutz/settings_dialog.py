@@ -80,6 +80,7 @@ from .app_settings import (
     DEFAULT_WATCH_ARCHIVE_AT,
     DEFAULT_WATCH_DISK_SCAN,
     DEFAULT_WATCH_DISK_SCAN_SEC,
+    DEFAULT_WATCH_MAX_CONCURRENT_CASES,
     DEFAULT_WATCH_POLL_SEC,
     DOCUFORMS2_IGRT_TYPE,
     ERROR_EMAIL_TO_KEY,
@@ -638,10 +639,10 @@ class SettingsDialog(QDialog):
         watcher = watcher_settings(self._original)
         self.watch_path = QLineEdit()
         self.watch_path.setText(watcher.get("watch_path") or "")
-        self.watch_path.setPlaceholderText(r"\\varianfs\VA_TRANSFER\QA\2.IGRT")
+        self.watch_path.setPlaceholderText(r"\\fileserver\QA\IGRT_Transfer")
         self.watch_data_root = QLineEdit()
         self.watch_data_root.setText(watcher.get("winstonlutz_data_root") or "")
-        self.watch_data_root.setPlaceholderText(r"\\uhmc-fs-share\Shares\RadOnc\Planning\Physics QA\WinstonLutz")
+        self.watch_data_root.setPlaceholderText(r"\\fileserver\QA\WinstonLutz")
         self.watch_recursive = QCheckBox("Watch subfolders")
         self.watch_recursive.setChecked(bool(watcher.get("watch_subfolders", True)))
         self.watch_disk_scan = QCheckBox("Scan disk for missed cases (UNC backup)")
@@ -671,6 +672,11 @@ class SettingsDialog(QDialog):
         )
         self.watch_disk_scan.toggled.connect(self.watch_disk_scan_sec.setEnabled)
         self.watch_disk_scan_sec.setEnabled(self.watch_disk_scan.isChecked())
+        self.watch_max_concurrent = QSpinBox()
+        self.watch_max_concurrent.setRange(1, 100)
+        self.watch_max_concurrent.setValue(
+            int(watcher.get("max_concurrent_cases") or DEFAULT_WATCH_MAX_CONCURRENT_CASES)
+        )
         self.watch_archive = QCheckBox("Archive old cases from WATCH_FOLDER to DATA_FOLDER")
         self.watch_archive.setChecked(bool(watcher.get("archive_old_cases", DEFAULT_WATCH_ARCHIVE)))
         self.watch_archive_age_days = QSpinBox()
@@ -698,7 +704,7 @@ class SettingsDialog(QDialog):
         self.df_enabled.setChecked(_as_bool(df.get("enabled", True)))
         self.df_backend = QLineEdit()
         self.df_backend.setText(str(df.get("backend_url") or ""))
-        self.df_backend.setPlaceholderText("https://roweb3.uhmc.sbuh.stonybrook.edu:9001")
+        self.df_backend.setPlaceholderText("https://docuforms.example.edu:9001")
         self.df_verify_ssl = QCheckBox("Verify SSL")
         self.df_verify_ssl.setChecked(_as_bool(df.get("verify_ssl", False)))
         self.df_dry_run = QCheckBox("Dry run (parse only, do not submit)")
@@ -720,7 +726,7 @@ class SettingsDialog(QDialog):
             self._original.get(MACHINES_KEY)
         )
         self.df_form_ids.setPlainText(format_form_ids(form_id_rows))
-        self.df_form_ids.setPlaceholderText("Edge = sb_edge_mlc_wl")
+        self.df_form_ids.setPlaceholderText("Linac1 = linac1_mlc_wl")
         self.df_form_ids.setTabChangesFocus(True)
         self.df_form_ids.setFixedHeight(110)
         self.df_email_success_event_to = QPlainTextEdit()
@@ -863,6 +869,7 @@ class SettingsDialog(QDialog):
         form.addRow("machine_to_case_dir_levels", self.watch_case_dir_levels)
         form.addRow("queued_case_poll_sec", self.watch_poll_sec)
         form.addRow("disk_scan_for_new_case_detection_sec", self.watch_disk_scan_sec)
+        form.addRow("max_concurrent_cases", self.watch_max_concurrent)
         form.addRow("archive_old_cases", self.watch_archive)
         form.addRow("archive_cases_older_than_days", self.watch_archive_age_days)
         form.addRow("archive_old_cases_at", self.watch_archive_at)
@@ -882,6 +889,9 @@ class SettingsDialog(QDialog):
                 "queued_case_poll_sec is how often a queued case is started. "
                 "disk_scan_for_new_case_detection walks the share for folders watchdog missed; "
                 "disk_scan_for_new_case_detection_sec is that interval. "
+                "max_concurrent_cases caps how many queued cases run at once -- extras wait in "
+                "the queue and start as a running case finishes (protects against many old "
+                "cases being requeued for reprocessing at once). "
                 "archive_old_cases moves folders older than archive_cases_older_than_days from each machine "
                 "WATCH_FOLDER to DATA_FOLDER at archive_old_cases_at (local time, about a 3-hour window). "
                 "Analysis settings come from MACHINES."
@@ -973,7 +983,7 @@ class SettingsDialog(QDialog):
                 "After analysis, winstonlutz can push the case to DocuForms2 "
                 "(same payload as _ref_projects/docuforms_import/scripts/upload_igrt). "
                 "form_ids maps machine NAME to a DocuForms2 form (one per line: "
-                "Edge = sb_edge_mlc_wl). A machine with no row is skipped. "
+                "Linac1 = linac1_mlc_wl). A machine with no row is skipped. "
                 "Successful uploads write .docuforms2_igrt.json in the case folder so the "
                 "watcher does not submit twice. Cases are not moved. "
                 "email_success_event_to gets ok / dry-run; email_failure_event_to gets failed "
@@ -1307,6 +1317,7 @@ class SettingsDialog(QDialog):
             "queued_case_poll_sec": self.watch_poll_sec.value(),
             "disk_scan_for_new_case_detection": self.watch_disk_scan.isChecked(),
             "disk_scan_for_new_case_detection_sec": self.watch_disk_scan_sec.value(),
+            "max_concurrent_cases": self.watch_max_concurrent.value(),
             "archive_old_cases": self.watch_archive.isChecked(),
             "archive_cases_older_than_days": self.watch_archive_age_days.value(),
             "archive_old_cases_at": self.watch_archive_at.time().toString("HH:mm"),

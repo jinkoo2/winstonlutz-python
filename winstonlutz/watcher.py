@@ -1,4 +1,10 @@
-"""Watch a transfer folder for configured trigger files and queue case directories."""
+"""Watch a transfer folder for configured trigger files and queue case directories.
+
+The dequeue loop only ever runs up to ``max_concurrent_cases`` (default 2)
+cases at once -- if many cases are queued at the same time (e.g. a batch of
+old cases requeued for reprocessing), the rest wait and start as soon as a
+running case finishes, rather than spawning a thread per case unbounded.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +30,14 @@ from .app_settings import (
     DEFAULT_WATCH_DISK_SCAN,
     DEFAULT_WATCH_DISK_SCAN_SEC,
     DEFAULT_WATCH_FILE_PATTERNS,
+    DEFAULT_WATCH_MAX_CONCURRENT_CASES,
     DEFAULT_WATCH_POLL_SEC,
     DEFAULT_WATCH_RECURSIVE,
+    SettingsPathUnavailable,
     _as_bool,
+    check_settings_paths,
     get_machines,
+    load_gui_settings,
     promote_watcher_aliases,
 )
 from .archive import archive_old_cases, next_archive_datetime, parse_archive_at
@@ -193,6 +203,7 @@ def default_watch_rules() -> dict:
         "archive_old_cases": DEFAULT_WATCH_ARCHIVE,
         "archive_cases_older_than_days": DEFAULT_WATCH_ARCHIVE_AGE_DAYS,
         "archive_old_cases_at": DEFAULT_WATCH_ARCHIVE_AT,
+        "max_concurrent_cases": DEFAULT_WATCH_MAX_CONCURRENT_CASES,
     }
 
 
@@ -245,11 +256,18 @@ def watch(
     poll_sec: float | None = None,
     stop_event: threading.Event | None = None,
     watcher: dict | None = None,
+    data: dict | None = None,
 ) -> None:
     watch_path = Path(watch_path)
     data_root = Path(data_root)
     rules = {**default_watch_rules(), **promote_watcher_aliases(watcher or {})}
     recursive = bool(rules.get("watch_subfolders", DEFAULT_WATCH_RECURSIVE))
+    try:
+        max_concurrent = max(
+            1, int(rules.get("max_concurrent_cases") or DEFAULT_WATCH_MAX_CONCURRENT_CASES)
+        )
+    except (TypeError, ValueError):
+        max_concurrent = DEFAULT_WATCH_MAX_CONCURRENT_CASES
     file_patterns = list(rules.get("new_case_file_patterns") or DEFAULT_WATCH_FILE_PATTERNS)
     case_folder_regex = str(rules.get("case_folder_name_regex") or "")
     try:
@@ -288,6 +306,18 @@ def watch(
     archive_at = parse_archive_at(
         rules.get("archive_old_cases_at") or DEFAULT_WATCH_ARCHIVE_AT
     )
+    settings = data if data is not None else load_gui_settings()
+    try:
+        check_settings_paths(
+            settings,
+            watch_path=watch_path,
+            data_root=data_root,
+            role="watch",
+            require=True,
+            log=logger,
+        )
+    except SettingsPathUnavailable as exc:
+        _notify_unavailable(str(exc))
     ensure_watch_folders(watch_path, data_root)
     queue: list[str] = []
     busy: set[str] = set()
@@ -323,7 +353,8 @@ def watch(
         "case_folder_name_regex=%s machine_to_case_dir_levels=%s "
         "queued_case_poll_sec=%.1f disk_scan_for_new_case_detection=%s "
         "disk_scan_for_new_case_detection_sec=%.1f disk_scan_min_age=%.1fs "
-        "archive_old_cases=%s archive_cases_older_than_days=%s archive_old_cases_at=%s",
+        "archive_old_cases=%s archive_cases_older_than_days=%s archive_old_cases_at=%s "
+        "max_concurrent_cases=%s",
         watch_path,
         recursive,
         file_patterns,
@@ -336,6 +367,7 @@ def watch(
         archive_enabled,
         archive_age_days,
         archive_at_text,
+        max_concurrent,
     )
     details = (
         f"watch_path={watch_path}\n"
@@ -350,7 +382,8 @@ def watch(
         f"disk_scan_min_age={disk_min_age}\n"
         f"archive_old_cases={archive_enabled}\n"
         f"archive_cases_older_than_days={archive_age_days}\n"
-        f"archive_old_cases_at={archive_at_text}"
+        f"archive_old_cases_at={archive_at_text}\n"
+        f"max_concurrent_cases={max_concurrent}"
     )
     send_event_email("Watcher started", details, context="watch-start", blocking=True)
     stop_event = stop_event or threading.Event()
@@ -438,12 +471,18 @@ def watch(
                         queue.append(case_key)
                 next_scan = now + disk_scan_sec
             if now >= next_dequeue:
-                case_dir = None
+                # Bounded: at most max_concurrent cases run at once (protects
+                # against many old cases being queued for reprocessing at
+                # once); fill every free slot each tick rather than starting
+                # just one, so cases don't trickle out slower than necessary
+                # when multiple slots are free.
+                to_start: list[str] = []
                 with lock:
-                    if queue:
+                    while queue and len(busy) < max_concurrent:
                         case_dir = queue.pop(0)
                         busy.add(case_dir)
-                if case_dir:
+                        to_start.append(case_dir)
+                for case_dir in to_start:
                     logger.info("Running case... %s", case_dir)
                     thread = threading.Thread(
                         target=_run_case,

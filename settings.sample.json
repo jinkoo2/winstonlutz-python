@@ -1,21 +1,21 @@
 // Sample Winston-Lutz settings (JSONC: // and /* */ comments are allowed).
 // Copy to settings.json next to WinstonLutz.exe. Saving Settings in the GUI drops comments.
 {
-  "Institution": "Your Institution",
+  "Institution": "Example Cancer Center",
   "RunMode": "Clinic",
   "Identity": {
     "user_id_method": "None",
     "oidc": {
-      "issuer": "https://login.apps.myphysics.net/realms/myphysics",
+      "issuer": "https://idp.example.edu/realms/example",
       "client_id": "winstonlutz",
       "scopes": "openid profile email",
       "redirect_uri": "http://127.0.0.1:17843/callback",
-      "registration_url": "https://login.apps.myphysics.net/realms/myphysics/account/"
+      "registration_url": "https://idp.example.edu/realms/example/account/"
     }
   },
   "Watcher": {
-    "watch_path": "\\\\varianfs\\VA_TRANSFER\\QA\\2.IGRT", // Aria transfer share
-    "winstonlutz_data_root": "\\\\uhmc-fs-share\\Shares\\RadOnc\\Planning\\Physics QA\\WinstonLutz",
+    "watch_path": "\\\\fileserver\\QA\\IGRT_Transfer", // Aria transfer share
+    "winstonlutz_data_root": "\\\\fileserver\\QA\\WinstonLutz",
     "watch_subfolders": true,
     "new_case_file_patterns": ["RE.*.dcm"], // globs that queue a new case
     "case_folder_name_regex": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
@@ -23,18 +23,19 @@
     "queued_case_poll_sec": 10,
     "disk_scan_for_new_case_detection": true, // UNC backup if watchdog misses a create
     "disk_scan_for_new_case_detection_sec": 60,
+    "max_concurrent_cases": 2, // caps how many queued cases run at once
     "archive_old_cases": true, // WATCH_FOLDER -> DATA_FOLDER
     "archive_cases_older_than_days": 7,
     "archive_old_cases_at": "01:00" // local time
   },
   "Notifications": {
     "email": {
-      "error_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
-      "event_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
-      "new_case_email_to": ["jinkoo.kim@stonybrookmedicine.edu"],
-      "email_from": "radonc.physics",
-      "email_domain": "stonybrookmedicine.edu",
-      "email_host_address": "uhmc-imail.uhmc.sunysb.edu",
+      "error_email_to": ["john.doe@example.edu"],
+      "event_email_to": ["john.doe@example.edu"],
+      "new_case_email_to": ["john.doe@example.edu"],
+      "email_from": "qa",
+      "email_domain": "example.edu",
+      "email_host_address": "smtp.example.edu",
       "email_host_port": 25,
       "enable_ssl": false,
       "email_from_enc_pw": ""
@@ -47,8 +48,8 @@
   "PostProcessing": [
     {
       "type": "docuforms2_igrt",
-      "enabled": true,
-      "backend_url": "https://roweb3.uhmc.sbuh.stonybrook.edu:9001",
+      "enabled": false,
+      "backend_url": "https://docuforms.example.edu:9001",
       "verify_ssl": false,
       "dry_run": false,
       "attach_dcm_zip": true,
@@ -56,22 +57,26 @@
       "resubmit": false,
       "timeout_sec": 300,
       "form_ids": [
-        {"machine": "Edge", "form_id": "sb_edge_mlc_wl"}
+        {"machine": "Linac1", "form_id": "linac1_mlc_wl"}
       ],
-      "email_success_event_to": ["jinkoo.kim@stonybrookmedicine.edu"],
-      "email_failure_event_to": ["jinkoo.kim@stonybrookmedicine.edu"]
+      "email_success_event_to": ["john.doe@example.edu"],
+      "email_failure_event_to": ["john.doe@example.edu"]
     }
   ],
   "MACHINES": [
     // WATCH_FOLDER = live transfer cases; DATA_FOLDER = archive
     {
-      "NAME": "Edge",
-      "WATCH_FOLDER": "",
-      "DATA_FOLDER": "sample_data/Edge/Data",
-      "REPORT_TEMPLATE_FILE_PATH": "sample_data/Edge/ReportTmplt/full/report1.tmpl.html",
+      "NAME": "Linac1",
+      "WATCH_FOLDER": "\\\\fileserver\\QA\\IGRT_Transfer\\Linac1",
+      "DATA_FOLDER": "\\\\fileserver\\QA\\WinstonLutz\\Linac1\\Data",
+      "REPORT_TEMPLATE_FILE_PATH": "\\\\fileserver\\QA\\WinstonLutz\\Linac1\\ReportTmplt\\full\\report1.tmpl.html",
       "CASE_FOLDER_NAME_REGEX": "^\\d{2}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$",
       "WL_pass_tolerance": 1.0,
-      "record_csv_file": "",
+      "new_case_email_to": [
+        "physicists@example.edu",
+        "therapists@example.edu"
+      ],
+      "record_csv_file": "\\\\fileserver\\QA\\WinstonLutz\\Linac1\\record.csv",
       "MV_bb_search_method": "ConnectedComponent",
       "kV_bb_search_method": "ConnectedComponent",
       "MV_field_search_method": "Otsu",
@@ -85,7 +90,7 @@
       "nominal_gantry_angles": [270, 0, 90, 180],
       "nominal_table_angles": [90, 45, 0, 315, 270],
       "nominal_collimator_angles": [135, 90, 45, 0, 315, 270, 225],
-      "DICOM_PLAN_FILE": "sample_data/Edge/Plan/RP.EdgeDryRun.WL.dcm",
+      "DICOM_PLAN_FILE": "\\\\fileserver\\QA\\IGRT_Transfer\\Linac1\\RP.sample.WL.dcm",
       "IGNORE_BEAMS": [2],
       "ALL_RI_IMAGE_REQUIRED": false
     }

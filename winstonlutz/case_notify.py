@@ -11,7 +11,7 @@ from pathlib import Path
 from .app_settings import get_institution, get_machines, named_machines, simple_machine_name
 from .emailer import send, smtp_settings
 from .identity import profile_email, subscribers_for_new_qa_case, users_dir
-from .pipeline import list_case_folders
+from .pipeline import case_has_html_report, case_has_results, list_case_folders
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,9 @@ def notify_new_qa_case(machine_name: str, case_folder: str | Path, *, send_mail:
         _mark_seen(key)
     if not send_mail:
         return True
+    if case_has_html_report(folder) or case_has_results(folder):
+        logger.debug("new-case email skipped; case already analyzed: %s", key)
+        return False
     recipients = [profile_email(p) for p in subscribers_for_new_qa_case(name)]
     if not recipients:
         return True
